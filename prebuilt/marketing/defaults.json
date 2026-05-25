@@ -1,0 +1,12 @@
+{
+  "autonomy": "medium",
+  "dialecticDepth": 0,
+  "dials": {
+    "exploration": 0.6,
+    "planStability": 0.5,
+    "riskTolerance": 0.6
+  },
+  "tool_manifest": [
+    { "name": "echo", "kind": "echo" }
+  ]
+}

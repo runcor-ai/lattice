@@ -1,0 +1,5 @@
+{
+  "name": "slice1-smoke",
+  "identity_seed": "I am the slice-1 smoke lattice; my job is to prove the cycle turns.",
+  "maxCycles": 1
+}

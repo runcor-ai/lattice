@@ -1,0 +1,33 @@
+{
+  "name": "@runcor/slowclock-app",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "slowclock": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit",
+    "start": "node ./dist/cli.js",
+    "dev": "node --import tsx ./src/cli.ts",
+    "clean": "rm -rf dist *.tsbuildinfo",
+    "lint": "eslint src"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "dependencies": {
+    "@runcor/slowclock": "workspace:*",
+    "@runcor/runtime": "workspace:*"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2"
+  }
+}

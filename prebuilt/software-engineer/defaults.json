@@ -1,0 +1,79 @@
+{
+  "autonomy": "medium",
+  "dialecticDepth": 0,
+  "dials": {
+    "exploration": 0.3,
+    "planStability": 0.7,
+    "riskTolerance": 0.3,
+    "memoryRecallBreadth": 0.6
+  },
+  "tool_manifest": [
+    {
+      "name": "src-listing",
+      "kind": "fs-read",
+      "description": "Recursive listing of the source repo (jailed, read-only).",
+      "role": { "sense": true, "action": false },
+      "readOnly": true,
+      "destructive": false,
+      "concurrencySafe": true,
+      "config": {
+        "root": "OPERATOR_MUST_OVERRIDE_source_repo_absolute_path",
+        "maxEntries": 300
+      }
+    },
+    {
+      "name": "src-read",
+      "kind": "fs-read-content",
+      "description": "Read one file's contents from the source repo (jailed, read-only).",
+      "role": { "sense": true, "action": true },
+      "readOnly": true,
+      "destructive": false,
+      "concurrencySafe": true,
+      "config": {
+        "root": "OPERATOR_MUST_OVERRIDE_source_repo_absolute_path",
+        "defaultMaxBytes": 16000,
+        "hardMaxBytes": 200000
+      }
+    },
+    {
+      "name": "out-write",
+      "kind": "fs-write",
+      "description": "Write a deliverable to the sandboxed output directory (jailed).",
+      "role": { "sense": false, "action": true },
+      "readOnly": false,
+      "destructive": false,
+      "concurrencySafe": false,
+      "config": {
+        "outDir": "OPERATOR_MUST_OVERRIDE_output_dir_absolute_path"
+      }
+    },
+    {
+      "name": "src-shell",
+      "kind": "shell-exec",
+      "description": "Run a read-only inspection command in the source repo (default allowlist: grep/find/ls/cat/git/npm/node).",
+      "role": { "sense": false, "action": true },
+      "readOnly": false,
+      "destructive": false,
+      "concurrencySafe": false,
+      "config": {
+        "cwd": "OPERATOR_MUST_OVERRIDE_source_repo_absolute_path",
+        "timeoutMs": 30000,
+        "outputMaxBytes": 8000
+      }
+    },
+    {
+      "name": "delegate-cc",
+      "kind": "claude-delegate",
+      "description": "Delegate a focused subtask to a fresh coding-agent subprocess (10-min default timeout).",
+      "role": { "sense": false, "action": true },
+      "readOnly": false,
+      "destructive": false,
+      "concurrencySafe": false,
+      "config": {
+        "workdir": "OPERATOR_MUST_OVERRIDE_workdir_absolute_path",
+        "timeoutMs": 600000,
+        "outputMaxBytes": 32000
+      }
+    }
+  ]
+}

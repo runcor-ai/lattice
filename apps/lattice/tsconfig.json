@@ -1,0 +1,17 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src"
+  },
+  "include": ["src/**/*"],
+  "exclude": ["**/*.test.ts", "dist"],
+  "references": [
+    { "path": "../../packages/runtime" },
+    { "path": "../../packages/trace" },
+    { "path": "../../packages/engine" },
+    { "path": "../../packages/capabilities" },
+    { "path": "../../packages/snapshot" },
+    { "path": "../../packages/rpp-parser" }
+  ]
+}

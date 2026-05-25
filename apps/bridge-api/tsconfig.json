@@ -1,0 +1,18 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src"
+  },
+  "include": ["src/**/*"],
+  "exclude": ["**/*.test.ts", "dist"],
+  "references": [
+    { "path": "../../packages/bridge-shared" },
+    { "path": "../../packages/runtime" },
+    { "path": "../../packages/trace" },
+    { "path": "../../packages/engine" },
+    { "path": "../../packages/capabilities" },
+    { "path": "../../packages/jobs" },
+    { "path": "../../packages/memory" }
+  ]
+}

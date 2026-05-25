@@ -1,0 +1,309 @@
+/* Runcor Lattice Bridge — design tokens (slice 14).
+ *
+ * Calm, information-dense. The Bridge is what an operator sees while
+ * autonomous entities run; the visual language has to keep them
+ * oriented at a glance. Dark-first; light theme is a follow-up.
+ *
+ * Constitution requirement (§19): "calm, clear, and information-dense
+ * without clutter; the live trace, the roster, and the dials should
+ * each read instantly."
+ */
+
+:root {
+  /* Palette — neutral first, three semantic accents. */
+  --bg-0: #0b0c0e;          /* page */
+  --bg-1: #111317;          /* panel */
+  --bg-2: #171a1f;          /* nested */
+  --bg-3: #1f242b;          /* hover */
+  --line: #262c34;          /* divider */
+  --line-strong: #353d48;
+  --text-0: #e8ecef;        /* primary */
+  --text-1: #b1b9c2;        /* secondary */
+  --text-2: #7a838e;        /* tertiary */
+  --text-3: #555b63;        /* tertiary-fade */
+  --accent: #7dd3fc;        /* sky-300 — cool, calm primary */
+  --accent-strong: #38bdf8;
+  --green: #84cc8b;         /* status: running */
+  --yellow: #fcd34d;        /* status: paused / warning */
+  --orange: #fb923c;        /* status: pressure: orange */
+  --red: #f87171;           /* status: crashed / red band */
+  --substrate: #c084fc;     /* trace.kind = substrate */
+  --subconscious: #67e8f9;  /* trace.kind = subconscious */
+
+  /* Spacing — 4px scale (operators read at 13–14px, comfortable on a desk). */
+  --s-0: 2px;
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 24px;
+  --s-6: 32px;
+  --s-7: 48px;
+  --s-8: 64px;
+
+  /* Type — system-ui for chrome, monospace for trace/data. */
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, 'Segoe UI', 'Helvetica Neue',
+    Arial, sans-serif;
+  --font-mono:
+    ui-monospace, 'JetBrains Mono', 'SF Mono', Menlo, Consolas, 'Liberation Mono',
+    monospace;
+
+  --t-xs: 11px;
+  --t-sm: 12px;
+  --t-md: 13px;
+  --t-lg: 15px;
+  --t-xl: 18px;
+  --t-2xl: 22px;
+  --t-3xl: 28px;
+
+  --leading-tight: 1.25;
+  --leading-normal: 1.45;
+
+  /* Radius. */
+  --r-1: 3px;
+  --r-2: 6px;
+  --r-3: 10px;
+
+  /* Borders. */
+  --bw: 1px;
+
+  /* Motion. */
+  --motion-fast: 80ms;
+  --motion-base: 160ms;
+  --easing: cubic-bezier(0.32, 0.72, 0, 1);
+
+  /* z-index. */
+  --z-toast: 60;
+  --z-modal: 50;
+  --z-header: 20;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--bg-0);
+  color: var(--text-0);
+  font-family: var(--font-sans);
+  font-size: var(--t-md);
+  line-height: var(--leading-normal);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+a:hover {
+  color: var(--accent-strong);
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: var(--bw) solid var(--line);
+  border-radius: var(--r-2);
+  padding: var(--s-2) var(--s-3);
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--easing), border-color var(--motion-fast) var(--easing);
+}
+button:hover {
+  background: var(--bg-3);
+  border-color: var(--line-strong);
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+button.primary {
+  background: var(--accent);
+  color: #0b1620;
+  border-color: var(--accent);
+}
+button.primary:hover {
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+}
+button.danger {
+  border-color: var(--red);
+  color: var(--red);
+}
+button.danger:hover {
+  background: rgba(248, 113, 113, 0.08);
+}
+
+input,
+textarea,
+select {
+  font: inherit;
+  color: var(--text-0);
+  background: var(--bg-2);
+  border: var(--bw) solid var(--line);
+  border-radius: var(--r-2);
+  padding: var(--s-2) var(--s-3);
+  width: 100%;
+}
+input:focus,
+textarea:focus,
+select:focus {
+  outline: none;
+  border-color: var(--accent);
+  background: var(--bg-1);
+}
+label {
+  display: block;
+  color: var(--text-1);
+  font-size: var(--t-sm);
+  margin-bottom: var(--s-1);
+  letter-spacing: 0.01em;
+}
+
+code,
+pre,
+.mono {
+  font-family: var(--font-mono);
+  font-size: var(--t-sm);
+}
+
+.muted {
+  color: var(--text-2);
+}
+.faint {
+  color: var(--text-3);
+}
+
+/* Scrollbars — calm. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: var(--bg-0);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--bg-3);
+  border-radius: var(--r-1);
+  border: 2px solid var(--bg-0);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--line-strong);
+}
+
+/* Status dots. */
+.dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-3);
+}
+.dot.running {
+  background: var(--green);
+  box-shadow: 0 0 6px rgba(132, 204, 139, 0.45);
+}
+.dot.paused {
+  background: var(--yellow);
+}
+.dot.stopped {
+  background: var(--text-3);
+}
+.dot.crashed {
+  background: var(--red);
+  box-shadow: 0 0 6px rgba(248, 113, 113, 0.45);
+}
+
+/* Chips. */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-1);
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--bg-2);
+  border: var(--bw) solid var(--line);
+  font-size: var(--t-xs);
+  color: var(--text-1);
+}
+.chip.accent {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Panels. */
+.panel {
+  background: var(--bg-1);
+  border: var(--bw) solid var(--line);
+  border-radius: var(--r-3);
+}
+.panel + .panel {
+  margin-top: var(--s-4);
+}
+.panel-header {
+  padding: var(--s-3) var(--s-4);
+  border-bottom: var(--bw) solid var(--line);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.panel-header h3 {
+  margin: 0;
+  font-size: var(--t-md);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-0);
+}
+.panel-body {
+  padding: var(--s-4);
+}
+
+/* Tables. */
+table.data {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--t-sm);
+}
+table.data th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--text-2);
+  padding: var(--s-2) var(--s-3);
+  border-bottom: var(--bw) solid var(--line);
+  letter-spacing: 0.02em;
+}
+table.data td {
+  padding: var(--s-2) var(--s-3);
+  border-bottom: var(--bw) solid var(--line);
+  vertical-align: middle;
+}
+table.data tr:last-child td {
+  border-bottom: none;
+}
+table.data tr:hover {
+  background: var(--bg-2);
+}
+
+/* Trace kind colours. */
+.trace-kind-phase {
+  color: var(--text-1);
+}
+.trace-kind-substrate {
+  color: var(--substrate);
+}
+.trace-kind-subconscious {
+  color: var(--subconscious);
+}
+.trace-kind-job {
+  color: var(--accent);
+}
+.trace-kind-operator {
+  color: var(--yellow);
+}

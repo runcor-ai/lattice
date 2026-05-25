@@ -1,0 +1,35 @@
+{
+  "name": "@runcor/bridge-ui",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "vite build",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "vue-tsc --noEmit",
+    "dev": "vite",
+    "preview": "vite preview",
+    "clean": "rm -rf dist .vite",
+    "lint": "eslint src"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "dependencies": {
+    "vue": "^3.5.13",
+    "pinia": "^2.3.0",
+    "vue-router": "^4.5.0",
+    "@runcor/bridge-shared": "workspace:*"
+  },
+  "devDependencies": {
+    "vite": "^5.4.11",
+    "@vitejs/plugin-vue": "^5.2.1",
+    "vue-tsc": "^2.2.0",
+    "typescript": "^5.7.3"
+  }
+}

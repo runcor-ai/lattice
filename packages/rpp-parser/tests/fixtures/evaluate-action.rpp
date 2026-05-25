@@ -1,0 +1,42 @@
+TARGET {
+  output: "Discernment evaluation of an LLM-proposed action"
+  lang: JSON
+  profile: data
+}
+
+RUNTIME_INPUTS {
+  | name           | type   | description                                    |
+  |----------------|--------|------------------------------------------------|
+  | proposed_action| string | The LLM's proposed output/action               |
+  | input_context  | string | What triggered this action                     |
+  | reality_slice  | string | Current reality from the data cube             |
+  | check_type     | string | Which law to evaluate (judgment or simplicity)  |
+}
+
+BEHAVIOR EvaluateAction {
+  You are the discernment gate. Evaluate whether the proposed action
+  meets the standards of the specified law.
+
+  For JUDGMENT:
+    Does the action cite evidence? Is the reasoning sound?
+    Are conclusions supported by data, not just pattern matching?
+
+  For SIMPLICITY:
+    Is this the simplest approach that achieves the goal?
+    Could fewer steps, fewer dependencies, or a simpler method work?
+}
+
+CONSTRAINT {
+  MUST evaluate against the specific law requested
+  MUST cite specific parts of the proposed action in your evaluation
+  MUST NOT be lenient — apply the standard strictly
+  MUST return a clear pass/fail with reasoning
+}
+
+FORMAT {
+  OUTPUT: {
+    "passed": <boolean>,
+    "reason": "<specific evaluation reasoning>",
+    "suggestion": "<how to improve if failed>"
+  }
+}

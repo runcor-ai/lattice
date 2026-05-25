@@ -1,0 +1,551 @@
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import fastifyStatic from '@fastify/static';
+import {
+  CompanyInstantiateSchema,
+  DialAdjustmentSchema,
+  EscalationDecisionSchema,
+  InstantiateSchema,
+  JobsHandSchema,
+  TraceQuerySchema,
+  type ErrorBody,
+  type InspectResponse,
+  type InstantiateResponse,
+} from '@runcor/bridge-shared';
+import Fastify, { type FastifyInstance } from 'fastify';
+
+import { BundleLoader } from './bundle-loader.js';
+import { SecretStore } from './secret-store.js';
+import { Supervisor } from './supervisor.js';
+
+export interface BuildServerOptions {
+  readonly dataDir: string;
+  readonly secrets?: SecretStore;
+  readonly uiDistDir?: string | null;
+  /** Root containing prebuilt role bundles. Default: <repo>/prebuilt */
+  readonly prebuiltDir?: string;
+}
+
+export interface BuiltServer {
+  readonly app: FastifyInstance;
+  readonly supervisor: Supervisor;
+  readonly secrets: SecretStore;
+  readonly bundles: BundleLoader;
+}
+
+const errorBody = (code: string, message: string, details?: Record<string, unknown>): ErrorBody => ({
+  error: { code, message, ...(details ? { details } : {}) },
+});
+
+export async function buildServer(opts: BuildServerOptions): Promise<BuiltServer> {
+  const app = Fastify({
+    logger: { level: process.env.NODE_ENV === 'test' ? 'error' : 'info' },
+    bodyLimit: 1_048_576,
+  });
+
+  const secrets = opts.secrets ?? new SecretStore();
+  const bundles = new BundleLoader({
+    root: opts.prebuiltDir ?? join(process.cwd(), 'prebuilt'),
+  });
+
+  const supervisor = new Supervisor({
+    dataDir: opts.dataDir,
+    resolveApiKey: (provider) => {
+      const s = secrets.load();
+      if (provider === 'anthropic') return s.anthropicApiKey;
+      if (provider === 'openai') return s.openaiApiKey;
+      return undefined;
+    },
+  });
+
+  /* --------------- Health --------------- */
+  app.get('/api/health', async () => ({ ok: true }));
+
+  /* --------------- Secrets --------------- */
+  app.get('/api/secrets', async () => secrets.redactedSummary());
+  app.post('/api/secrets', async (req, reply) => {
+    const body = req.body as Partial<{
+      anthropicApiKey: string;
+      openaiApiKey: string;
+    }>;
+    const current = secrets.load();
+    secrets.save({
+      ...(body.anthropicApiKey !== undefined
+        ? { anthropicApiKey: body.anthropicApiKey }
+        : current.anthropicApiKey
+          ? { anthropicApiKey: current.anthropicApiKey }
+          : {}),
+      ...(body.openaiApiKey !== undefined
+        ? { openaiApiKey: body.openaiApiKey }
+        : current.openaiApiKey
+          ? { openaiApiKey: current.openaiApiKey }
+          : {}),
+    });
+    return reply.code(204).send();
+  });
+
+  /* --------------- Roster --------------- */
+  app.get('/api/lattices', async () => supervisor.list());
+
+  /* --------------- Instantiate --------------- */
+  app.post('/api/lattices', async (req, reply) => {
+    const parsed = InstantiateSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply
+        .code(400)
+        .send(errorBody('invalid_request', parsed.error.issues[0]?.message ?? 'invalid'));
+    }
+    // If bundle_id is supplied, pull the bundle so its
+    // starting-knowledge.json gets seeded into memory by the
+    // supervisor's seedFromBundle pass. The request's other fields
+    // (identity_seed, tool_manifest, model_backend, autonomy) still
+    // win — bundle is only used for memory seeding here.
+    const bundle = parsed.data.bundle_id ? bundles.get(parsed.data.bundle_id) : undefined;
+    const out = supervisor.instantiate(parsed.data, bundle ? { bundle } : {});
+    const response: InstantiateResponse = {
+      lattice_id: out.id,
+      sqlite_path: out.sqlitePath,
+      pids: out.pids,
+      trace_stream_url: `/api/lattices/${out.id}/trace/stream`,
+    };
+    return reply.code(201).send(response);
+  });
+
+  /* --------------- Inspect --------------- */
+  app.get('/api/lattices/:id', async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const r = supervisor.get(id);
+    if (!r) return reply.code(404).send(errorBody('lattice_not_found', `no lattice ${id}`));
+    const list = supervisor.list().find((row) => row.lattice_id === id);
+    if (!list) return reply.code(404).send(errorBody('lattice_not_found', `no lattice ${id}`));
+
+    // Compose the inspect payload by reading the lattice's DB directly.
+    const db = r.lattice.dbHandle();
+    const idRow = db
+      .prepare<[]>(`SELECT composed_body, composed_at_cycle FROM identity_current WHERE id='self'`)
+      .get() as { composed_body: string; composed_at_cycle: number } | undefined;
+    const counts = {
+      identity_count: (db.prepare<[]>(`SELECT COUNT(*) AS n FROM memory_identity`).get() as { n: number }).n,
+      plan_jobs_open: (db.prepare<[]>(`SELECT COUNT(*) AS n FROM plan_job WHERE status='open'`).get() as { n: number }).n,
+      plan_jobs_closed: (db.prepare<[]>(`SELECT COUNT(*) AS n FROM plan_job WHERE status LIKE 'closed_%'`).get() as { n: number }).n,
+      episodic_count: (db.prepare<[]>(`SELECT COUNT(*) AS n FROM memory_episodic`).get() as { n: number }).n,
+      semantic_count: (db.prepare<[]>(`SELECT COUNT(*) AS n FROM memory_semantic`).get() as { n: number }).n,
+    };
+    const decisions = (
+      db
+        .prepare<[]>(
+          `SELECT body FROM trace WHERE phase='decide' ORDER BY id DESC LIMIT 10`,
+        )
+        .all() as Array<{ body: string }>
+    ).map((row) => safeJson(row.body));
+    const drift = (
+      db
+        .prepare<[]>(
+          `SELECT body FROM trace WHERE kind='operator' AND body LIKE '%drift%' ORDER BY id DESC LIMIT 5`,
+        )
+        .all() as Array<{ body: string }>
+    ).map((row) => safeJson(row.body));
+
+    const inspect: InspectResponse = {
+      ...list,
+      identity: {
+        composed_body: idRow?.composed_body ?? r.lattice.identity.composed_body,
+        at_cycle: idRow?.composed_at_cycle ?? 0,
+      },
+      memory_summary: counts,
+      dials: { autonomy: r.lattice.autonomy },
+      recent_decisions: decisions,
+      drift_history: drift,
+    };
+    return inspect;
+  });
+
+  /* --------------- Trace (paginated) --------------- */
+  app.get('/api/lattices/:id/trace', async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const r = supervisor.get(id);
+    if (!r) return reply.code(404).send(errorBody('lattice_not_found', `no lattice ${id}`));
+    const parsed = TraceQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      return reply
+        .code(400)
+        .send(errorBody('invalid_query', parsed.error.issues[0]?.message ?? 'invalid'));
+    }
+    const q = parsed.data;
+    const db = r.lattice.dbHandle();
+    let sql = `SELECT id, cycle, at_ms, kind, phase, body FROM trace WHERE 1=1`;
+    const args: unknown[] = [];
+    if (q.after_cycle !== undefined) {
+      sql += ` AND cycle > ?`;
+      args.push(q.after_cycle);
+    }
+    if (q.kind !== undefined) {
+      sql += ` AND kind = ?`;
+      args.push(q.kind);
+    }
+    if (q.phase !== undefined) {
+      sql += ` AND phase = ?`;
+      args.push(q.phase);
+    }
+    sql += ` ORDER BY id ASC LIMIT ?`;
+    args.push(q.limit);
+    const rows = db.prepare(sql).all(...args) as Array<{
+      id: number;
+      cycle: number;
+      at_ms: number;
+      kind: string;
+      phase: string | null;
+      body: string;
+    }>;
+    return rows.map((row) => safeJson(row.body));
+  });
+
+  /* --------------- Trace SSE --------------- */
+  app.get('/api/lattices/:id/trace/stream', async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const r = supervisor.get(id);
+    if (!r) return reply.code(404).send(errorBody('lattice_not_found', `no lattice ${id}`));
+
+    // Tell Fastify we're taking over the raw response.
+    reply.hijack();
+
+    reply.raw.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+
+    // Catch-up: from Last-Event-Id if provided.
+    const lastIdHeader = req.headers['last-event-id'];
+    const lastId = typeof lastIdHeader === 'string' ? Number(lastIdHeader) : 0;
+    const db = r.lattice.dbHandle();
+    // Catchup is the LAST 50 entries (chronological) so the operator
+    // lands with a recent snapshot — not 500 entries from cycle 1.
+    const catchup = db
+      .prepare<[number]>(
+        `SELECT id, body FROM (
+           SELECT id, body FROM trace WHERE id > ? ORDER BY id DESC LIMIT 50
+         ) ORDER BY id ASC`,
+      )
+      .all(lastId) as Array<{ id: number; body: string }>;
+    let highestId = lastId;
+    for (const row of catchup) {
+      reply.raw.write(`id: ${row.id}\nevent: trace\ndata: ${row.body}\n\n`);
+      if (row.id > highestId) highestId = row.id;
+    }
+
+    // Heartbeat so proxies / EventSource keep the connection open.
+    const heartbeat = setInterval(() => {
+      try {
+        reply.raw.write(`: keepalive\n\n`);
+      } catch {
+        /* socket closed; close handler will clean up */
+      }
+    }, 15_000);
+
+    // Coalesce: the stub backend can cycle hundreds of times per second
+    // (~1.4k trace writes/sec). Browsers cannot reactively render that.
+    // Buffer entries from the subscriber and drain at ~5 Hz, capped at
+    // SSE_BATCH_MAX entries per drain. Anything over emits a skipped-N
+    // marker so the operator can see throttling is active. The full
+    // trace remains queryable via GET /api/lattices/:id/trace.
+    // Throttle only kicks in for runaway streams (the stub backend
+    // emits ~1,440 trace events/sec). Real-backend lattices emit
+    // ~10-20 events per cycle clustered around the long decide
+    // phase — the cap below comfortably absorbs that without
+    // emitting sse_throttled markers.
+    const SSE_DRAIN_MS = 250;
+    const SSE_BATCH_MAX = 100;
+    const buf: unknown[] = [];
+    let dropped = 0;
+    const drain = (): void => {
+      if (buf.length === 0 && dropped === 0) return;
+      const take = buf.splice(0, Math.min(buf.length, SSE_BATCH_MAX));
+      if (buf.length > 0) {
+        dropped += buf.length;
+        buf.length = 0;
+      }
+      try {
+        for (const entry of take) {
+          highestId += 1;
+          reply.raw.write(
+            `id: ${highestId}\nevent: trace\ndata: ${JSON.stringify(entry)}\n\n`,
+          );
+        }
+        if (dropped > 0) {
+          highestId += 1;
+          reply.raw.write(
+            `id: ${highestId}\nevent: trace\ndata: ${JSON.stringify({
+              kind: 'operator',
+              cycle: 0,
+              at_ms: Date.now(),
+              action: 'sse_throttled',
+              detail: `skipped ${dropped} trace entries (server-side coalesce); full trace via GET /trace`,
+            })}\n\n`,
+          );
+          dropped = 0;
+        }
+      } catch {
+        /* socket closed; close handler will clean up */
+      }
+    };
+    const drainTimer = setInterval(drain, SSE_DRAIN_MS);
+
+    const unsubscribe = r.lattice.trace.subscribe((entry) => {
+      buf.push(entry);
+    });
+
+    req.raw.on('close', () => {
+      clearInterval(heartbeat);
+      clearInterval(drainTimer);
+      unsubscribe();
+      try {
+        reply.raw.end();
+      } catch {
+        /* already ended */
+      }
+    });
+  });
+
+  /* --------------- Dials --------------- */
+  app.patch('/api/lattices/:id/dials', async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const r = supervisor.get(id);
+    if (!r) return reply.code(404).send(errorBody('lattice_not_found', `no lattice ${id}`));
+    const parsed = DialAdjustmentSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply
+        .code(400)
+        .send(errorBody('invalid_request', parsed.error.issues[0]?.message ?? 'invalid'));
+    }
+    // Slice 14: only autonomy is wired live; other dials are accepted but
+    // their effect lands as Bridge follow-up (dial table writes).
+    const autonomyVal = parsed.data.dials['autonomy'];
+    if (autonomyVal === 'low' || autonomyVal === 'medium' || autonomyVal === 'high') {
+      r.lattice.autonomy = autonomyVal;
+    }
+    r.lattice.trace.write({
+      kind: 'operator',
+      cycle: r.lattice.completedCycle,
+      at_ms: Date.now(),
+      action: 'dial_adjusted',
+      detail: `${JSON.stringify(parsed.data.dials)}; why: ${parsed.data.why}`,
+    });
+    return { applied_at_cycle: r.lattice.completedCycle };
+  });
+
+  /* --------------- Lifecycle actions --------------- */
+  app.post('/api/lattices/:id/actions/:action', async (req, reply) => {
+    const { id, action } = req.params as { id: string; action: string };
+    const r = supervisor.get(id);
+    if (!r) return reply.code(404).send(errorBody('lattice_not_found', `no lattice ${id}`));
+    switch (action) {
+      case 'pause':
+        supervisor.pause(id);
+        return { applied_at_cycle: r.lattice.completedCycle };
+      case 'resume':
+        supervisor.resume(id);
+        return { applied_at_cycle: r.lattice.completedCycle };
+      case 'stop':
+        await supervisor.stop(id);
+        return { applied_at_cycle: r.lattice.completedCycle };
+      case 'swap-backend': {
+        const body = req.body as { model_backend?: unknown };
+        if (!body.model_backend) {
+          return reply
+            .code(400)
+            .send(errorBody('invalid_request', 'model_backend required'));
+        }
+        // Reuse the InstantiateSchema for shape validation; only model_backend matters.
+        const parsed = InstantiateSchema.shape.model_backend.safeParse(body.model_backend);
+        if (!parsed.success) {
+          return reply
+            .code(400)
+            .send(errorBody('invalid_request', parsed.error.issues[0]?.message ?? 'invalid'));
+        }
+        supervisor.swapBackend(id, parsed.data);
+        return { applied_at_cycle: r.lattice.completedCycle };
+      }
+      default:
+        return reply.code(400).send(errorBody('invalid_action', `unknown action: ${action}`));
+    }
+  });
+
+  /* --------------- Jobs --------------- */
+  app.post('/api/lattices/:id/jobs', async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const r = supervisor.get(id);
+    if (!r) return reply.code(404).send(errorBody('lattice_not_found', `no lattice ${id}`));
+    const parsed = JobsHandSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply
+        .code(400)
+        .send(errorBody('invalid_request', parsed.error.issues[0]?.message ?? 'invalid'));
+    }
+    // Hand the job to the lattice via the JobsService directly (the
+    // lattice's decide phase will pick it up next cycle).
+    const { JobsService } = await import('@runcor/jobs');
+    const jobs = new JobsService(r.lattice.dbHandle());
+    const job = jobs.openJob({
+      title: parsed.data.title,
+      source: 'operator',
+      why: parsed.data.why,
+      cycle: r.lattice.completedCycle,
+      at_ms: Date.now(),
+    });
+    if (parsed.data.items) {
+      for (const item of parsed.data.items) {
+        jobs.addItem(job.id, {
+          description: item.description,
+          spec: safeJson(item.completion_check) as { hooks: { name: string }[] },
+        });
+      }
+    }
+    return reply.code(201).send({ job_id: job.id });
+  });
+
+  /* --------------- Escalations --------------- */
+  app.post('/api/lattices/:id/escalations/:escalation_id/decide', async (req, reply) => {
+    const { id } = req.params as { id: string; escalation_id: string };
+    const r = supervisor.get(id);
+    if (!r) return reply.code(404).send(errorBody('lattice_not_found', `no lattice ${id}`));
+    const parsed = EscalationDecisionSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply
+        .code(400)
+        .send(errorBody('invalid_request', parsed.error.issues[0]?.message ?? 'invalid'));
+    }
+    r.lattice.trace.write({
+      kind: 'operator',
+      cycle: r.lattice.completedCycle,
+      at_ms: Date.now(),
+      action: 'escalation_decided',
+      detail: `decision=${parsed.data.decision} note=${parsed.data.operator_note ?? '(none)'}`,
+    });
+    return { applied_at_cycle: r.lattice.completedCycle };
+  });
+
+  /* --------------- Bundles --------------- */
+  app.get('/api/bundles', async () =>
+    bundles.list().map((b) => ({
+      id: b.id,
+      autonomy: b.defaults.autonomy,
+      dialecticDepth: b.defaults.dialecticDepth,
+      tool_count: b.defaults.tool_manifest.length,
+      identity_seed_preview: b.seedPrompt.slice(0, 280),
+    })),
+  );
+
+  /* --------------- Companies (slice 15) --------------- */
+  app.post('/api/companies', async (req, reply) => {
+    const parsed = CompanyInstantiateSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply
+        .code(400)
+        .send(errorBody('invalid_request', parsed.error.issues[0]?.message ?? 'invalid'));
+    }
+    const results: { lattice_id: string; bundle_id: string; pids: { fast: number } }[] = [];
+    const rejections: { bundle_id: string; reason: string }[] = [];
+
+    for (const m of parsed.data.members) {
+      const bundle = bundles.get(m.bundle_id);
+      if (!bundle) {
+        rejections.push({ bundle_id: m.bundle_id, reason: `unknown bundle id "${m.bundle_id}"` });
+        continue;
+      }
+      const built = supervisor.instantiate(
+        {
+          name: m.name_override ?? bundle.id,
+          identity_seed: m.seed_prompt_override ?? bundle.seedPrompt,
+          goals: [],
+          dials: bundle.defaults.dials as Record<
+            string,
+            string | number | boolean | Record<string, unknown>
+          >,
+          tool_manifest: [...bundle.defaults.tool_manifest],
+          model_backend: { kind: 'stub' },
+          autonomy: bundle.defaults.autonomy,
+          dialecticDepth: bundle.defaults.dialecticDepth,
+          bundle_id: bundle.id,
+        },
+        { bundle },
+      );
+      results.push({ lattice_id: built.id, bundle_id: bundle.id, pids: built.pids });
+    }
+    if (rejections.length > 0) {
+      return reply.code(400).send(errorBody('unknown_bundles', 'one or more bundle ids could not be resolved', { rejections }));
+    }
+    return reply.code(201).send(results);
+  });
+
+  /* --------------- Static UI --------------- */
+  if (opts.uiDistDir && existsSync(opts.uiDistDir)) {
+    await app.register(fastifyStatic, {
+      root: opts.uiDistDir,
+      prefix: '/',
+      decorateReply: true,
+    });
+    // SPA fallback: any non-/api/* path that didn't match a static
+    // asset falls back to index.html so Vue Router can resolve the
+    // route client-side. Without this, deep links like
+    // /inspect/<lattice-id> 404 on hard-refresh.
+    app.setNotFoundHandler(async (req, reply) => {
+      if (req.url.startsWith('/api/')) {
+        return reply.code(404).send(errorBody('not_found', `no route for ${req.url}`));
+      }
+      const index = join(opts.uiDistDir!, 'index.html');
+      if (existsSync(index)) {
+        return reply.sendFile('index.html');
+      }
+      return reply.code(404).send(errorBody('not_found', `no route for ${req.url}`));
+    });
+  }
+
+  return { app, supervisor, secrets, bundles };
+}
+
+function safeJson(s: string): Record<string, unknown> {
+  try {
+    return JSON.parse(s) as Record<string, unknown>;
+  } catch {
+    return { _raw: s };
+  }
+}
+
+const isMain = (() => {
+  try {
+    const me = fileURLToPath(import.meta.url);
+    return me === process.argv[1];
+  } catch {
+    return false;
+  }
+})();
+
+if (isMain) {
+  const dataDir = process.env.RUNCOR_BRIDGE_DATA ?? join(process.cwd(), 'data');
+  const uiDist = process.env.RUNCOR_BRIDGE_UI_DIST ?? null;
+  // Resolve prebuilt/ relative to THIS module's location (apps/bridge-api/dist/server.js
+  // → ../../.. → repo root → /prebuilt) rather than process.cwd(), which would be
+  // apps/bridge-api/ when launched via `pnpm --filter @runcor/bridge-api run start`.
+  // Operator can override with RUNCOR_BRIDGE_PREBUILT for non-standard layouts.
+  const prebuiltDir =
+    process.env.RUNCOR_BRIDGE_PREBUILT ??
+    join(fileURLToPath(import.meta.url), '..', '..', '..', '..', 'prebuilt');
+  const built = await buildServer({ dataDir, uiDistDir: uiDist, prebuiltDir });
+  const host = process.env.RUNCOR_BRIDGE_BIND ?? '127.0.0.1';
+  const port = Number(process.env.RUNCOR_BRIDGE_PORT ?? 7100);
+  if (host !== '127.0.0.1') {
+    console.warn(`[bridge-api] WARNING: bound to ${host} (not loopback); single-tenant local-only is the v1 trust boundary (FR-055).`);
+  }
+  await built.app.listen({ host, port });
+  console.log(`bridge-api listening on http://${host}:${port}`);
+  process.on('SIGINT', async () => {
+    console.log('\n[bridge-api] shutting down…');
+    await built.supervisor.closeAll();
+    await built.app.close();
+    process.exit(0);
+  });
+}
