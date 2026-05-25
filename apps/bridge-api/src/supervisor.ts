@@ -1,0 +1,453 @@
+import { existsSync, mkdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+
+import type {
+  AutonomyValue,
+  Bundle,
+  InstantiateRequest,
+  ManifestEntry,
+  ModelBackendSpec,
+  RosterRow,
+} from '@runcor/bridge-shared';
+import {
+  makeClaudeDelegateAction,
+  makeEchoSense,
+  makeFsReadContentAction,
+  makeFsReadSense,
+  makeFsWriteAction,
+  makeNoopAction,
+  makeShellExecAction,
+  type Capability,
+} from '@runcor/capabilities';
+import {
+  ClaudeCodeHostBackend,
+  spawnCliRunner,
+  StubBackend,
+  type ModelBackend,
+} from '@runcor/engine';
+import { Memory } from '@runcor/memory';
+import { Lattice, type LatticeOptions } from '@runcor/runtime';
+
+/**
+ * Supervisor — manages the set of running lattices the Bridge owns.
+ *
+ * Slice 14 runs lattices IN-PROCESS (one `Lattice` per entry). The
+ * intent spec calls for child processes per lattice; slice 14b can
+ * lift this to spawn `apps/lattice` per entry — the Lattice class
+ * exposes the same surface either way. Tests + the operator's
+ * golden path are the priority here.
+ *
+ * Each lattice still owns its own SQLite file + lockfile (so two
+ * lattices can never collide on storage even though they share a
+ * Node process here).
+ */
+
+export interface SupervisorOptions {
+  /** Directory where per-lattice SQLite files live. */
+  readonly dataDir: string;
+  /** Secret resolver (closure over SecretStore.load()). */
+  readonly resolveApiKey?: (provider: 'anthropic' | 'openai') => string | undefined;
+}
+
+interface Record {
+  readonly id: string;
+  readonly name: string;
+  readonly sqlitePath: string;
+  readonly lattice: Lattice;
+  readonly modelBackendKind: ModelBackendSpec['kind'];
+  status: 'running' | 'paused' | 'stopped' | 'crashed';
+  loopController: AbortController | null;
+  loopPromise: Promise<unknown> | null;
+}
+
+export class Supervisor {
+  private readonly records = new Map<string, Record>();
+  private readonly dataDir: string;
+  private readonly resolveApiKey: SupervisorOptions['resolveApiKey'];
+
+  constructor(opts: SupervisorOptions) {
+    this.dataDir = opts.dataDir;
+    if (!existsSync(this.dataDir)) {
+      mkdirSync(this.dataDir, { recursive: true });
+    }
+    this.resolveApiKey = opts.resolveApiKey;
+  }
+
+  list(): readonly RosterRow[] {
+    return [...this.records.values()].map((r) => this.toRow(r));
+  }
+
+  get(id: string): Record | undefined {
+    return this.records.get(id);
+  }
+
+  /**
+   * Optionally seeds memory rows from a Bundle's startingKnowledge.
+   * Called from `instantiate` when a bundle is supplied.
+   */
+  private seedFromBundle(lattice: Lattice, bundle: Bundle): void {
+    const memory = new Memory(lattice.dbHandle());
+    const ctx = { cycle: 0, at_ms: Date.now() };
+    for (const row of bundle.startingKnowledge.identity) {
+      memory.write(
+        'identity',
+        { body: row.body, why: row.why, admissionTag: 'decision' },
+        ctx,
+      );
+    }
+    for (const row of bundle.startingKnowledge.semantic) {
+      memory.write(
+        'semantic',
+        { body: row.body, why: row.why, admissionTag: 'guidance' },
+        ctx,
+      );
+    }
+  }
+
+  instantiate(
+    req: InstantiateRequest,
+    opts: { bundle?: Bundle } = {},
+  ): { id: string; sqlitePath: string; pids: { fast: number } } {
+    // resume_from_path: the operator points at an existing entity SQLite
+    // and the lattice opens it instead of creating a fresh one. The id
+    // is derived from the file's basename so a resumed lattice keeps
+    // the original identity end-to-end (Principle II: the DB IS the
+    // entity; the running process is disposable). Bundle seeding is
+    // skipped on resume — the existing entity already has its identity
+    // and semantic memories from the original instantiation.
+    let id: string;
+    let sqlitePath: string;
+    const resuming = typeof req.resume_from_path === 'string' && req.resume_from_path.length > 0;
+    if (resuming) {
+      sqlitePath = req.resume_from_path!;
+      if (!existsSync(sqlitePath)) {
+        throw new Error(`resume_from_path does not exist: ${sqlitePath}`);
+      }
+      const base = sqlitePath.split(/[/\\]/).pop() ?? '';
+      id = base.replace(/\.sqlite$/i, '');
+      if (id.length === 0) {
+        throw new Error(`resume_from_path: cannot derive lattice id from "${sqlitePath}"`);
+      }
+      if (this.records.has(id)) {
+        throw new Error(`resume_from_path: a lattice with id "${id}" is already running; stop it first`);
+      }
+    } else {
+      id = req.bundle_id
+        ? `${req.bundle_id}-${Math.random().toString(36).slice(2, 8)}`
+        : `lat-${Math.random().toString(36).slice(2, 10)}`;
+      sqlitePath = join(this.dataDir, `${id}.sqlite`);
+      if (!existsSync(dirname(sqlitePath))) {
+        mkdirSync(dirname(sqlitePath), { recursive: true });
+      }
+    }
+
+    const engine = this.buildBackend(req.model_backend);
+    const { senses, actions } = this.buildCapabilities(req.tool_manifest ?? []);
+
+    const latticeOpts: LatticeOptions = {
+      identity: { composed_body: req.identity_seed },
+      engine,
+      senses,
+      actions,
+      sqlite: { path: sqlitePath },
+      name: req.name,
+      autonomy: req.autonomy as AutonomyValue,
+      dialecticDepth: req.dialecticDepth,
+    };
+    const lattice = new Lattice(latticeOpts);
+
+    // Skip bundle seeding when resuming — the existing entity already
+    // has its starting-knowledge memories from the original run.
+    if (opts.bundle && !resuming) {
+      try {
+        this.seedFromBundle(lattice, opts.bundle);
+      } catch (err) {
+        // bundle seed failure shouldn't take down the lattice;
+        // operational log only (slice 14 follow-up adds pino here).
+        void err;
+      }
+    }
+
+    const ctrl = new AbortController();
+    const record: Record = {
+      id,
+      name: req.name,
+      sqlitePath,
+      lattice,
+      modelBackendKind: req.model_backend.kind,
+      status: 'running',
+      loopController: ctrl,
+      loopPromise: null,
+    };
+    this.records.set(id, record);
+
+    // Kick off the continuous loop, but yield first so the response can be sent.
+    record.loopPromise = (async () => {
+      try {
+        await lattice.runUntilAborted(ctrl.signal);
+      } catch (err) {
+        record.status = 'crashed';
+        // operational logging in slice 14 follow-up
+        void err;
+      }
+    })();
+
+    return { id, sqlitePath, pids: { fast: process.pid } };
+  }
+
+  pause(id: string): boolean {
+    const r = this.records.get(id);
+    if (!r) return false;
+    if (r.status !== 'running') return false;
+    r.loopController?.abort();
+    r.status = 'paused';
+    return true;
+  }
+
+  resume(id: string): boolean {
+    const r = this.records.get(id);
+    if (!r) return false;
+    if (r.status !== 'paused') return false;
+    r.loopController = new AbortController();
+    const ctrl = r.loopController;
+    r.status = 'running';
+    r.loopPromise = (async () => {
+      try {
+        await r.lattice.runUntilAborted(ctrl.signal);
+      } catch {
+        r.status = 'crashed';
+      }
+    })();
+    return true;
+  }
+
+  async stop(id: string): Promise<boolean> {
+    const r = this.records.get(id);
+    if (!r) return false;
+    r.loopController?.abort();
+    if (r.loopPromise) await r.loopPromise;
+    r.lattice.close();
+    r.status = 'stopped';
+    this.records.delete(id);
+    return true;
+  }
+
+  swapBackend(id: string, spec: ModelBackendSpec): boolean {
+    const r = this.records.get(id);
+    if (!r) return false;
+    const next = this.buildBackend(spec);
+    r.lattice.setEngine(next);
+    return true;
+  }
+
+  /** Close everything (graceful shutdown). */
+  async closeAll(): Promise<void> {
+    await Promise.all([...this.records.keys()].map((id) => this.stop(id)));
+  }
+
+  private toRow(r: Record): RosterRow {
+    return {
+      lattice_id: r.id,
+      name: r.name,
+      status: r.status,
+      cycle: r.lattice.completedCycle,
+      open_jobs: 0, // slice-15 wires real plan_job count
+      current_plan_summary: '',
+      goals_summary: [],
+      budget: null,
+      model_backend: r.modelBackendKind,
+      pids: { fast: process.pid, slow: null },
+      autonomy: r.lattice.autonomy,
+    };
+  }
+
+  private buildCapabilities(manifest: readonly ManifestEntry[]): {
+    senses: Capability<unknown, unknown>[];
+    actions: Capability<unknown, unknown>[];
+  } {
+    const senses: Capability<unknown, unknown>[] = [];
+    const actions: Capability<unknown, unknown>[] = [];
+    let sawSense = false;
+    let sawAction = false;
+
+    for (const entry of manifest) {
+      switch (entry.kind) {
+        case 'echo':
+          senses.push(makeEchoSense() as Capability<unknown, unknown>);
+          sawSense = true;
+          break;
+        case 'noop':
+          actions.push(makeNoopAction() as Capability<unknown, unknown>);
+          sawAction = true;
+          break;
+        case 'fs-read': {
+          const root = (entry.config as { root?: string } | undefined)?.root;
+          if (typeof root !== 'string' || root.length === 0) {
+            throw new Error(
+              `tool_manifest entry "${entry.name}" (fs-read) requires config.root (absolute path)`,
+            );
+          }
+          const maxEntries = (entry.config as { maxEntries?: number } | undefined)?.maxEntries;
+          senses.push(
+            makeFsReadSense({
+              name: entry.name,
+              root,
+              ...(typeof maxEntries === 'number' ? { maxEntries } : {}),
+            }) as Capability<unknown, unknown>,
+          );
+          sawSense = true;
+          break;
+        }
+        case 'fs-read-content': {
+          const cfg = (entry.config ?? {}) as { root?: string; defaultMaxBytes?: number; hardMaxBytes?: number };
+          if (typeof cfg.root !== 'string' || cfg.root.length === 0) {
+            throw new Error(
+              `tool_manifest entry "${entry.name}" (fs-read-content) requires config.root (absolute path)`,
+            );
+          }
+          const cap = makeFsReadContentAction({
+            name: entry.name,
+            root: cfg.root,
+            ...(typeof cfg.defaultMaxBytes === 'number' ? { defaultMaxBytes: cfg.defaultMaxBytes } : {}),
+            ...(typeof cfg.hardMaxBytes === 'number' ? { hardMaxBytes: cfg.hardMaxBytes } : {}),
+          }) as Capability<unknown, unknown>;
+          // It's both a sense and an action; add to both arrays so it's discoverable in
+          // both observe (for sense channel) and act (for action channel).
+          senses.push(cap);
+          actions.push(cap);
+          sawSense = true;
+          sawAction = true;
+          break;
+        }
+        case 'fs-write': {
+          const cfg = (entry.config ?? {}) as { outDir?: string };
+          if (typeof cfg.outDir !== 'string' || cfg.outDir.length === 0) {
+            throw new Error(
+              `tool_manifest entry "${entry.name}" (fs-write) requires config.outDir (absolute path)`,
+            );
+          }
+          actions.push(
+            makeFsWriteAction({
+              name: entry.name,
+              outDir: cfg.outDir,
+            }) as Capability<unknown, unknown>,
+          );
+          sawAction = true;
+          // Deterministic auto-pairing: every fs-write capability comes
+          // with a complimentary fs-read sense over the same outDir, so
+          // the lattice automatically observes what it has produced on
+          // every cycle — no LLM cycle required to invoke a "list my
+          // outputs" action. The paired sense is named "<name>-listing"
+          // and is suppressed only if the operator already declared a
+          // sense with that exact name in the manifest.
+          const pairedName = `${entry.name}-listing`;
+          const alreadyDeclared = manifest.some(
+            (e) => e.name === pairedName && (e.kind === 'fs-read' || e.kind === 'fs-read-content'),
+          );
+          if (!alreadyDeclared) {
+            senses.push(
+              makeFsReadSense({
+                name: pairedName,
+                root: cfg.outDir,
+              }) as Capability<unknown, unknown>,
+            );
+            sawSense = true;
+          }
+          break;
+        }
+        case 'shell-exec': {
+          const cfg = (entry.config ?? {}) as {
+            cwd?: string;
+            allowedVerbs?: string[];
+            timeoutMs?: number;
+            outputMaxBytes?: number;
+          };
+          if (typeof cfg.cwd !== 'string' || cfg.cwd.length === 0) {
+            throw new Error(
+              `tool_manifest entry "${entry.name}" (shell-exec) requires config.cwd (absolute path)`,
+            );
+          }
+          actions.push(
+            makeShellExecAction({
+              name: entry.name,
+              cwd: cfg.cwd,
+              ...(Array.isArray(cfg.allowedVerbs) ? { allowedVerbs: cfg.allowedVerbs } : {}),
+              ...(typeof cfg.timeoutMs === 'number' ? { timeoutMs: cfg.timeoutMs } : {}),
+              ...(typeof cfg.outputMaxBytes === 'number' ? { outputMaxBytes: cfg.outputMaxBytes } : {}),
+            }) as Capability<unknown, unknown>,
+          );
+          sawAction = true;
+          break;
+        }
+        case 'claude-delegate': {
+          const cfg = (entry.config ?? {}) as {
+            workdir?: string;
+            command?: string;
+            args?: string[];
+            timeoutMs?: number;
+            outputMaxBytes?: number;
+          };
+          if (typeof cfg.workdir !== 'string' || cfg.workdir.length === 0) {
+            throw new Error(
+              `tool_manifest entry "${entry.name}" (claude-delegate) requires config.workdir (absolute path)`,
+            );
+          }
+          actions.push(
+            makeClaudeDelegateAction({
+              name: entry.name,
+              workdir: cfg.workdir,
+              ...(typeof cfg.command === 'string' ? { command: cfg.command } : {}),
+              ...(Array.isArray(cfg.args) ? { args: cfg.args } : {}),
+              ...(typeof cfg.timeoutMs === 'number' ? { timeoutMs: cfg.timeoutMs } : {}),
+              ...(typeof cfg.outputMaxBytes === 'number' ? { outputMaxBytes: cfg.outputMaxBytes } : {}),
+            }) as Capability<unknown, unknown>,
+          );
+          sawAction = true;
+          break;
+        }
+        case 'api':
+        case 'mcp':
+          // Slice 14 follow-up: wire api/mcp factories from manifest config.
+          // For now we accept the entry and skip — substrate would log this.
+          break;
+      }
+    }
+
+    // EchoSense is the baseline sense; only add it if no other sense
+    // was wired. NoopAction is ALWAYS added — it's the always-available
+    // "do nothing this cycle" escape hatch the substrate can fall back
+    // to. Even with rich actions wired, the lattice may legitimately
+    // choose noop (e.g. when no useful action is justified yet).
+    if (!sawSense) senses.push(makeEchoSense() as Capability<unknown, unknown>);
+    if (!actions.some((a) => a.name === 'noop')) {
+      actions.push(makeNoopAction() as Capability<unknown, unknown>);
+    }
+    void sawAction;
+
+    return { senses, actions };
+  }
+
+  private buildBackend(spec: ModelBackendSpec): ModelBackend {
+    switch (spec.kind) {
+      case 'stub':
+        return new StubBackend();
+      case 'claude-code-host':
+        return new ClaudeCodeHostBackend({
+          runner: spawnCliRunner({
+            ...(spec.config?.command ? { command: spec.config.command } : {}),
+            ...(spec.config?.args ? { args: [...spec.config.args] } : {}),
+          }),
+        });
+      case 'direct-api': {
+        const provider = spec.config?.provider ?? 'anthropic';
+        const key = this.resolveApiKey?.(provider);
+        if (!key) {
+          // Fall back to the stub so the Bridge can demo without a key.
+          return new StubBackend({ name: `direct-api-${provider}-stub` });
+        }
+        // Real provider SDK wiring lives in slice 14b; for now we shim to stub.
+        return new StubBackend({ name: `direct-api-${provider}-shimmed` });
+      }
+    }
+  }
+}
