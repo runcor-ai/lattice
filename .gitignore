@@ -1,0 +1,58 @@
+# Node / pnpm
+node_modules/
+.pnpm-store/
+dist/
+build/
+coverage/
+*.tsbuildinfo
+.turbo/
+
+# IDE / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Local agent settings may contain auth tokens
+.claude/settings.local.json
+.claude/.credentials*
+.claude/logs/
+
+# SQLite entity files (runtime artifacts of running lattices)
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+data/
+data-*/
+snapshots/
+
+# Per-task port/working trees created by lattices configured with
+# fs-write capabilities pointed at the repo root (e.g. private-workspace/ for
+# the worked example migration exercise). These are runtime artefacts of
+# running lattices, not source.
+private-workspace/
+
+# Logs
+*.log
+logs/
+
+# Test artifacts
+.vitest-cache/
+
+# Local reference material — not republished.
+claude-code-main/
+
+# Older draft documents superseded by the intent spec + constitution.
+FUNCTIONAL-SPEC.md
+runcor-lattice-build-spec*.md
+runcor-comparison-tables.md
+runcor-site-update-instructions*.md
+runcor.ai-content.json
+open-claude.bat
+

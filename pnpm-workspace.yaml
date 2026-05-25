@@ -1,0 +1,14 @@
+packages:
+  - 'packages/*'
+  - 'apps/*'
+
+# Native build scripts that must run on install. pnpm 11 ignores
+# all build scripts by default for supply-chain safety; this map
+# explicitly approves the known-good native deps of this repo.
+# Without these set to `true`, better-sqlite3's native binding
+# never gets compiled and every cycle that touches SQLite throws
+# at runtime.
+allowBuilds:
+  better-sqlite3: true
+  esbuild: true
+  vue-demi: true

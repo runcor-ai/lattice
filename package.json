@@ -1,0 +1,37 @@
+{
+  "name": "runcor-lattice",
+  "version": "0.0.0",
+  "private": true,
+  "description": "One autonomous cognitive entity that turns an LLM into something operating continuously over long time horizons",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0",
+    "pnpm": ">=11.0.0"
+  },
+  "packageManager": "pnpm@11.3.0",
+  "scripts": {
+    "build": "turbo run build",
+    "test": "turbo run test",
+    "test:watch": "turbo run test -- --watch",
+    "typecheck": "turbo run typecheck",
+    "lint": "turbo run lint",
+    "lint:fix": "turbo run lint -- --fix",
+    "dev": "turbo run dev",
+    "bridge:start": "pnpm --filter @runcor/bridge-api run start",
+    "bridge:dev": "pnpm --filter @runcor/bridge-ui exec vite",
+    "bridge:build": "turbo run build --filter=@runcor/bridge-ui --filter=@runcor/bridge-api",
+    "clean": "turbo run clean && rm -rf node_modules .turbo"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "@typescript-eslint/eslint-plugin": "^8.20.0",
+    "@typescript-eslint/parser": "^8.20.0",
+    "eslint": "^9.18.0",
+    "eslint-plugin-import": "^2.31.0",
+    "prettier": "^3.4.2",
+    "turbo": "^2.3.4",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.8"
+  }
+}

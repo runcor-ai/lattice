@@ -1,0 +1,81 @@
+import type { AutonomyLevel } from '@runcor/substrate';
+
+import type { Checklist } from './checklist.js';
+import type { Item, Job } from './types.js';
+
+/**
+ * Sign-off (spec FR-039).
+ *
+ * Closure paths branch on the autonomy dial:
+ *   - high   → lattice closes itself (no operator confirmation).
+ *   - medium → lattice closes itself, escalates a confirmation entry
+ *              for the operator to see post-hoc.
+ *   - low    → lattice does NOT close; signals pending confirmation
+ *              and waits for an explicit operatorApproved call.
+ *
+ * The "partially complete" mode (FR-037) is automatic when any items
+ * are still deferred at closure time.
+ */
+
+export type ClosureMode = 'full' | 'partial';
+
+export interface ClosureRequest {
+  readonly jobId: string;
+  readonly cycle: number;
+  readonly at_ms: number;
+  readonly autonomy: AutonomyLevel;
+  /** Operator explicitly approving the close (low-autonomy path). */
+  readonly operatorApproved?: boolean;
+}
+
+export type ClosureResult =
+  | { result: 'closed'; mode: ClosureMode; job: Job }
+  | { result: 'pending_operator'; mode: ClosureMode; reason: string }
+  | { result: 'not_ready'; reason: string };
+
+/**
+ * Attempt to close a job. Returns:
+ *   - 'closed'           — the job is closed (status = closed_full or closed_partial).
+ *   - 'pending_operator' — at autonomy=low without operatorApproved=true.
+ *   - 'not_ready'        — there are still `open` items (neither passed nor deferred).
+ */
+export function attemptClose(
+  checklist: Checklist,
+  req: ClosureRequest,
+): ClosureResult {
+  const job = checklist.getJob(req.jobId);
+  if (!job) return { result: 'not_ready', reason: `job ${req.jobId} not found` };
+  if (job.status !== 'open') {
+    return { result: 'not_ready', reason: `job already ${job.status}` };
+  }
+
+  const items = checklist.items(req.jobId);
+  const openItems = items.filter((i) => i.state === 'open');
+  if (openItems.length > 0) {
+    return {
+      result: 'not_ready',
+      reason: `${openItems.length} item(s) still open; cannot close yet`,
+    };
+  }
+  const deferred = items.filter((i) => i.state === 'deferred');
+  const mode: ClosureMode = deferred.length === 0 ? 'full' : 'partial';
+  const status = mode === 'full' ? 'closed_full' : 'closed_partial';
+
+  if (req.autonomy === 'low' && !req.operatorApproved) {
+    return {
+      result: 'pending_operator',
+      mode,
+      reason: `autonomy=low: ${itemsSummary(items)}`,
+    };
+  }
+
+  checklist.closeJobWith(req.jobId, { status, cycle: req.cycle, at_ms: req.at_ms });
+  const refreshed = checklist.getJob(req.jobId)!;
+  return { result: 'closed', mode, job: refreshed };
+}
+
+function itemsSummary(items: readonly Item[]): string {
+  const passed = items.filter((i) => i.state === 'passed').length;
+  const deferred = items.filter((i) => i.state === 'deferred').length;
+  return `${passed} passed, ${deferred} deferred`;
+}
