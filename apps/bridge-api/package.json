@@ -27,6 +27,7 @@
     "zod": "^3.24.1",
     "better-sqlite3": "^11.7.0",
     "@runcor/bridge-shared": "workspace:*",
+    "@runcor/identity": "workspace:*",
     "@runcor/runtime": "workspace:*",
     "@runcor/trace": "workspace:*",
     "@runcor/engine": "workspace:*",

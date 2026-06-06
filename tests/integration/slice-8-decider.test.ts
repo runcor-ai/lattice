@@ -55,6 +55,7 @@ describe('Slice 8 — decider wired into the cycle', () => {
       actions: [makeNoopAction()],
       sqlite: { path: sqlitePath },
       dialecticDepth: 1,
+      memoryClocks: false, // isolate the decider's per-cycle call count (Item 1 clocks add engine calls)
     });
     expect(lattice.decider.name).toBe('dialectic');
     await lattice.runOnce();

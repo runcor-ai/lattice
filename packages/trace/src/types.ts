@@ -51,6 +51,7 @@ export type JobEvent =
   | 'item_failed_iterating'
   | 'item_deferred'
   | 'item_unblocked'
+  | 'item_appended'
   | 'closed_full'
   | 'closed_partial';
 

@@ -20,9 +20,11 @@ export {
 } from './fs-write-action.js';
 export {
   makeShellExecAction,
+  runShellCommand,
   type ShellExecInput,
   type ShellExecResult,
   type ShellExecOptions,
+  type RunShellOptions,
 } from './shell-exec-action.js';
 export {
   makeClaudeDelegateAction,
@@ -36,6 +38,12 @@ export {
   type CloseJobItemResult,
   type CloseJobItemOptions,
 } from './close-job-item-action.js';
+export {
+  makeAppendPlanItemAction,
+  type AppendPlanItemInput,
+  type AppendPlanItemResult,
+  type AppendPlanItemOptions,
+} from './append-plan-item-action.js';
 export { makeNoopAction, type NoopInput } from './noop-action.js';
 export { Perception, type PerceptionOptions } from './perception.js';
 export { actOne, type ActArgs, type ActResult } from './act-gate.js';

@@ -32,7 +32,7 @@ export interface CloseJobItemInput {
 
 export interface CloseJobItemResult {
   readonly itemId: string;
-  readonly outcome: 'passed' | 'failed_iterating' | 'judgement_required' | 'iteration_cap_exceeded';
+  readonly outcome: 'passed' | 'failed_iterating' | 'judgement_required' | 'iteration_cap_exceeded' | 'blocked';
   readonly reason?: string;
 }
 
@@ -40,13 +40,14 @@ export interface CloseJobItemOptions {
   readonly name?: string;
   /**
    * Runner that performs the close attempt. Injected by the runtime
-   * layer with a JobsService.attemptCheck wrapper. Synchronous because
-   * the underlying check is synchronous SQLite work.
+   * layer with a JobsService.attemptCheck wrapper. May be async: Item 7
+   * completion-check gates (command_exits_zero, http_status_is) are
+   * evaluated here on an explicit close and are inherently asynchronous.
    */
   readonly attemptCheck: (
     itemId: string,
     ctx: { cycle: number },
-  ) => CloseJobItemResult;
+  ) => CloseJobItemResult | Promise<CloseJobItemResult>;
 }
 
 export function makeCloseJobItemAction(

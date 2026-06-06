@@ -1,5 +1,7 @@
 import { actOne, type ActContext } from '@runcor/capabilities';
 
+import { hashActionInput, isPersistenceViolation, PERSISTENCE_WINDOW, recordAction } from '../persistence.js';
+import type { RuntimeMemoryAdapter } from '../sqlite-memory.js';
 import type { ActOutput, CycleContext, DecideOutput } from '../types.js';
 
 /**
@@ -8,10 +10,36 @@ import type { ActOutput, CycleContext, DecideOutput } from '../types.js';
  *   - canInvoke() permission check before invoke.
  *   - 'denied' / 'failed' / 'no-action' / 'ok' outcomes.
  *
+ * Item 6 — the Persistence substrate law runs at the TOP of dispatch:
+ * an exact (action, inputs) repeat within the rolling window is refused
+ * before invoke, with a forced substrate-violation trace, so the lattice
+ * must choose differently. Only successfully-dispatched actions are
+ * recorded, so no-op idling and retry-after-failure stay legal.
+ *
  * Slice 12 plumbs real budget; slice 14 reads the autonomy dial
  * straight from the entity table.
  */
 export async function act(ctx: CycleContext, prev: DecideOutput): Promise<ActOutput> {
+  const db = (ctx.memory as RuntimeMemoryAdapter).dbHandle();
+  const inputHash = prev.chosenAction ? hashActionInput(prev.chosenInput) : '';
+
+  if (prev.chosenAction && isPersistenceViolation(db, prev.chosenAction, inputHash, ctx.cycle)) {
+    ctx.trace.write({
+      kind: 'substrate',
+      cycle: ctx.cycle,
+      at_ms: ctx.at_ms,
+      phase: 'act',
+      outcome: 'block',
+      law: 'persistence',
+      reason: `action "${prev.chosenAction}" with identical inputs was already dispatched within the last ${PERSISTENCE_WINDOW} cycles`,
+    });
+    return {
+      ...prev,
+      actResult: 'failed',
+      actFailedReason: `Persistence violation: "${prev.chosenAction}" with identical inputs was already attempted in the last ${PERSISTENCE_WINDOW} cycles. Choose a different action.`,
+    };
+  }
+
   const actCtx: ActContext = {
     cycle: ctx.cycle,
     lastReadAtMs: null,
@@ -28,6 +56,9 @@ export async function act(ctx: CycleContext, prev: DecideOutput): Promise<ActOut
 
   switch (out.result) {
     case 'ok':
+      // Record only dispatched (ok) actions — this is what makes idle/
+      // failed/denied naturally exempt from the Persistence law.
+      if (prev.chosenAction) recordAction(db, prev.chosenAction, inputHash, ctx.cycle);
       return { ...prev, actResult: 'ok', actData: out.data };
     case 'no-action':
       return { ...prev, actResult: 'no-action' };

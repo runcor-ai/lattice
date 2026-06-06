@@ -51,6 +51,18 @@ export class RuntimeMemoryAdapter implements MemorySink, MemoryRecallView {
     }));
   }
 
+  /** Item 1 — the fast-clock situation report (null before the first tick). */
+  currentSituation(): string | null {
+    const tableExists = this.db
+      .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='situation_current'`)
+      .get();
+    if (!tableExists) return null;
+    const row = this.db
+      .prepare(`SELECT body FROM situation_current WHERE id = 'self'`)
+      .get() as { body: string } | undefined;
+    return row?.body ?? null;
+  }
+
   size(system?: MemoryWrite['system']): number {
     if (system === 'episodic') return this.memory.episodic.totalCount();
     if (system === 'semantic') return this.memory.semantic.totalCount();

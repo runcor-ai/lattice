@@ -98,6 +98,10 @@ export type SnapshotDest = z.infer<typeof SnapshotDestSchema>;
 export const InstantiateSchema = z.object({
   name: z.string().min(1).max(80),
   identity_seed: z.string().min(1),
+  /** Item 11 — ordered persona bundle names composed (with identity_seed appended) into Layer 1. */
+  persona_bundles: z.array(z.string().min(1)).optional(),
+  /** Item 10 — Layer 2 (init) seed content, promoted to memory once at startup. */
+  init_seed: z.string().optional(),
   goals: z.array(z.string().min(1)).default([]),
   dials: z.record(DialValueSchema).default({}),
   tool_manifest: z.array(ManifestEntrySchema).default([]),
@@ -132,7 +136,7 @@ export type InstantiateResponse = z.infer<typeof InstantiateResponseSchema>;
 
 /* -------------------- Roster + inspect -------------------- */
 
-export const LatticeStatusSchema = z.enum(['running', 'paused', 'stopped', 'crashed']);
+export const LatticeStatusSchema = z.enum(['running', 'paused', 'stopped', 'crashed', 'paused_no_jobs']);
 export type LatticeStatus = z.infer<typeof LatticeStatusSchema>;
 
 export const RosterRowSchema = z.object({
@@ -201,6 +205,18 @@ export const JobsHandSchema = z.object({
     .optional(),
 });
 export type JobsHand = z.infer<typeof JobsHandSchema>;
+
+/** Item 8 — the lattice appends one item to an existing open job. */
+export const AppendItemSchema = z.object({
+  description: z.string().min(1),
+  gate: z.object({
+    type: z.string().min(1),
+    args: z.record(z.unknown()).optional(),
+  }),
+  blocked_by: z.string().optional(),
+  why: z.string().optional(),
+});
+export type AppendItem = z.infer<typeof AppendItemSchema>;
 
 export const EscalationDecisionSchema = z.object({
   decision: z.enum(['approve', 'reject']),

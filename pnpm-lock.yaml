@@ -50,6 +50,9 @@ importers:
       '@runcor/engine':
         specifier: workspace:*
         version: link:../../packages/engine
+      '@runcor/identity':
+        specifier: workspace:*
+        version: link:../../packages/identity
       '@runcor/jobs':
         specifier: workspace:*
         version: link:../../packages/jobs
@@ -227,6 +230,9 @@ importers:
 
   packages/jobs:
     dependencies:
+      '@runcor/capabilities':
+        specifier: workspace:*
+        version: link:../capabilities
       '@runcor/substrate':
         specifier: workspace:*
         version: link:../substrate

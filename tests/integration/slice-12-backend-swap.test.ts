@@ -43,6 +43,7 @@ describe('Slice 12 — backend swap mid-flight (T230 / FR-054 swap-backend)', ()
       senses: [makeEchoSense()],
       actions: [makeNoopAction()],
       sqlite: { path: sqlitePath },
+      memoryClocks: false, // isolate per-cycle backend call count (Item 1 clocks add engine calls)
     });
     await lattice.runOnce();
     expect(stubCalls).toBe(1);
