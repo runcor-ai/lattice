@@ -2,14 +2,14 @@
 
 **Purpose:** Resolve every placeholder path in `lattice-changes-spec.md` to a real `file:line` in this repo, with a PRESENT / PARTIAL / ABSENT verdict and the precise *delta* (the work that actually remains). No code changed yet — this is the review artefact before implementation.
 
-**Source spec:** `C:\runcor May 3 2026\lattice-changes-spec.md`
-**Target codebase:** `C:\runcor-lattice\` (this repo — pnpm/turbo monorepo, `packages/*` + `apps/*`)
+**Source spec:** the operator-local `lattice-changes-spec.md` (kept outside this repo).
+**Target codebase:** this repository — a pnpm/turbo monorepo (`packages/*` + `apps/*`).
 
 ---
 
 ## 0. Critical correction — the spec targets THIS tree, not the sibling-repo tree
 
-The spec uses placeholder paths (`packages/jobs/src/sign-off.ts`, `packages/runtime/src/phases/write.ts`). Those resolve **here**, in `C:\runcor-lattice\` — a pnpm/turbo monorepo with 20 packages and 4 apps. They do **not** resolve in `C:\runcor May 3 2026\runcor-lattice\`, which is an older sibling-repo layout (`src/loop/cycle.ts`, separate `runcor-*` repos) where none of the jobs/sign-off/bridge-jobs infrastructure exists. The spec's source debugging session (`2026-05-26-job-auto-close-missing`, lattice `software-engineer-jlxt3h`, `plan_job.status`) was run against this monorepo. All "already defined / already tested" claims in the spec refer to this tree and are substantially accurate.
+The spec uses placeholder paths (`packages/jobs/src/sign-off.ts`, `packages/runtime/src/phases/write.ts`). Those resolve **here**, in this pnpm/turbo monorepo (20 packages, 4 apps). They do **not** resolve in the older sibling-repo layout (`src/loop/cycle.ts`, separate `runcor-*` repos) where none of the jobs/sign-off/bridge-jobs infrastructure exists. The spec's source debugging session (`2026-05-26-job-auto-close-missing`, lattice `software-engineer-jlxt3h`, `plan_job.status`) was run against this monorepo. All "already defined / already tested" claims in the spec refer to this tree and are substantially accurate.
 
 **Implication:** Most items are *deltas on existing infrastructure*, not greenfield builds. The jobs subsystem, completion-check registry, supervisor pause/resume, slow clock, and trace plumbing already exist.
 

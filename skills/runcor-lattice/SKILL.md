@@ -73,13 +73,14 @@ The bridge has six operator-facing endpoint families:
 |---|---|
 | `GET  /api/health` | Liveness check |
 | `GET  /api/lattices` | Roster of running lattices |
-| `POST /api/lattices` | Instantiate a new lattice (or resume an existing one via `resume_from_path`) |
+| `POST /api/lattices` | Instantiate a new lattice. Options: `persona_bundles` (ordered Layer-1 fragments), `init_seed` (Layer-2 setup, promoted to memory once), `bundle_id`, or `resume_from_path` to reopen an existing entity |
 | `GET  /api/lattices/:id` | Inspect (cycle, memory counts, identity, recent decisions, dial state, drift history) |
 | `GET  /api/lattices/:id/trace` | Paginated trace (filter by `kind`, `phase`, `after_cycle`) |
 | `GET  /api/lattices/:id/trace/stream` | SSE live trace (server-side coalesced) |
 | `PATCH /api/lattices/:id/dials` | Adjust dials mid-flight (autonomy / etc) — requires `why` field |
 | `POST /api/lattices/:id/actions/{pause,resume,stop,swap-backend}` | Lifecycle controls |
-| `POST /api/lattices/:id/jobs` | Hand the lattice a job (title + why + items[]) |
+| `POST /api/lattices/:id/jobs` | Hand the lattice a job (title + why + body + items[]). A gated checklist-plan item is auto-inserted first; the job won't close until the lattice writes its plan |
+| `POST /api/lattices/:id/jobs/:job_id/items` | Append one gated item to an open job (the lattice also does this itself mid-run) |
 | `POST /api/lattices/:id/escalations/:escalation_id/decide` | Approve / reject substrate-escalated outputs |
 | `GET  /api/bundles` | List prebuilt role bundles available |
 | `POST /api/companies` | Instantiate multiple lattices from bundles in one call (bundles with placeholder tool paths will reject) |
@@ -165,7 +166,11 @@ const { lattice_id, sqlite_path, trace_stream_url } = await res.json();
 
 A job is what the operator hands the lattice. Title + why + items.
 Each item has a `completion_check` — JSON describing how to verify
-it's done. **Always prefer deterministic `file_exists` checks**:
+it's done. **Always prefer deterministic `file_exists` checks** (the
+workhorse). The vocabulary also includes `content_contains`
+(file substring/regex), `command_exits_zero` (run a command in the
+shell sandbox, pass on exit 0), and `http_status_is` — costly hooks run
+only on explicit close, not the every-cycle sweep:
 
 ```js
 const fe = (path, minBytes = 200) =>
@@ -279,7 +284,7 @@ work around them or try to re-introduce the patterns they prevent:
 4. **Use `bundle_id: 'software-engineer'`** for codebase-analysis-or-migration work; it pre-seeds engineering heuristics into semantic memory.
 5. **Set `autonomy: 'high'`** for unattended runs, `'medium'` if the operator wants to approve destructive actions, `'low'` if they want every action to wait for them.
 6. **Watch via the SSE stream** — don't poll faster than once-per-30-seconds for routine checks.
-7. **Stop cleanly** with `POST .../actions/stop` when the operator is satisfied. Don't leave lattices idling on `noop` — each noop cycle still consumes one LLM call.
+7. **Stop cleanly** with `POST .../actions/stop` when the operator is satisfied. (A lattice with no open jobs now auto-pauses — `paused_no_jobs`, no LLM calls — and wakes when a new job arrives; but stop it when the engagement is truly done.)
 8. **Backup the SQLite** when something important happens — `sqlite3 entity.sqlite ".backup snapshot.sqlite"` produces a self-contained file.
 
 ## What the lattice is NOT
