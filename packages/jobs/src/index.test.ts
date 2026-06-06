@@ -14,7 +14,8 @@ function freshDb() {
       id TEXT PRIMARY KEY, opened_at_cycle INTEGER NOT NULL, opened_at_ms INTEGER NOT NULL,
       title TEXT NOT NULL, source TEXT NOT NULL,
       status TEXT NOT NULL CHECK (status IN ('open','closed_full','closed_partial')),
-      closed_at_cycle INTEGER, closed_at_ms INTEGER, why TEXT NOT NULL
+      closed_at_cycle INTEGER, closed_at_ms INTEGER, why TEXT NOT NULL,
+      body TEXT NOT NULL DEFAULT ''
     );
     CREATE TABLE plan_item (
       id TEXT PRIMARY KEY,
@@ -24,7 +25,8 @@ function freshDb() {
       iteration_count INTEGER NOT NULL DEFAULT 0,
       completion_check TEXT NOT NULL,
       passed_at_cycle INTEGER, deferred_at_cycle INTEGER,
-      defer_reason TEXT, unblock_condition TEXT, unblock_test TEXT
+      defer_reason TEXT, unblock_condition TEXT, unblock_test TEXT,
+      source TEXT NOT NULL DEFAULT 'operator', blocked_by TEXT
     );
   `);
   return db;
@@ -71,27 +73,27 @@ describe('Checklist — pass-by-assertion is rejected (T178 / FR-034)', () => {
 /* ============================== T179 + T183a ============================== */
 
 describe('Iteration & cap (T179 / T183a / FR-035 / analyze C4)', () => {
-  it('failing check increments iteration_count; item stays open', () => {
+  it('failing check increments iteration_count; item stays open', async () => {
     const svc = new JobsService(freshDb());
     const job = svc.openJob({ title: 't', source: 's', why: 'y', cycle: 1, at_ms: 1 });
     const item = svc.addItem(job.id, { description: 'i', spec: spec('always_fail') });
-    const r = svc.attemptCheck(item.id, { cycle: 1 });
+    const r = await svc.attemptCheck(item.id, { cycle: 1 });
     expect(r.outcome).toBe('failed_iterating');
     expect(r.item.iteration_count).toBe(1);
     expect(r.item.state).toBe('open');
   });
 
-  it('a passing hook marks the item passed', () => {
+  it('a passing hook marks the item passed', async () => {
     const svc = new JobsService(freshDb());
     const job = svc.openJob({ title: 't', source: 's', why: 'y', cycle: 1, at_ms: 1 });
     const item = svc.addItem(job.id, { description: 'i', spec: spec('always_pass') });
-    const r = svc.attemptCheck(item.id, { cycle: 1 });
+    const r = await svc.attemptCheck(item.id, { cycle: 1 });
     expect(r.outcome).toBe('passed');
     expect(r.item.state).toBe('passed');
     expect(r.item.passed_at_cycle).toBe(1);
   });
 
-  it('after iteration_cap failures, attemptCheck returns iteration_cap_exceeded', () => {
+  it('after iteration_cap failures, attemptCheck returns iteration_cap_exceeded', async () => {
     const svc = new JobsService(freshDb());
     const job = svc.openJob({ title: 't', source: 's', why: 'y', cycle: 1, at_ms: 1 });
     // Use a tight cap=2.
@@ -100,13 +102,13 @@ describe('Iteration & cap (T179 / T183a / FR-035 / analyze C4)', () => {
       description: 'i',
       spec: checkSpec,
     });
-    svc.attemptCheck(item.id, { cycle: 1 });
-    svc.attemptCheck(item.id, { cycle: 2 });
-    const r3 = svc.attemptCheck(item.id, { cycle: 3 });
+    await svc.attemptCheck(item.id, { cycle: 1 });
+    await svc.attemptCheck(item.id, { cycle: 2 });
+    const r3 = await svc.attemptCheck(item.id, { cycle: 3 });
     expect(r3.outcome).toBe('iteration_cap_exceeded');
   });
 
-  it('judgement_required is returned when all hooks pass AND a judgement spec exists', () => {
+  it('judgement_required is returned when all hooks pass AND a judgement spec exists', async () => {
     const svc = new JobsService(freshDb());
     const job = svc.openJob({ title: 't', source: 's', why: 'y', cycle: 1, at_ms: 1 });
     const checkSpec: CompletionCheckSpec = {
@@ -114,21 +116,21 @@ describe('Iteration & cap (T179 / T183a / FR-035 / analyze C4)', () => {
       judgement: { criterion: 'is the spec coherent?' },
     };
     const item = svc.addItem(job.id, { description: 'i', spec: checkSpec });
-    const r = svc.attemptCheck(item.id, { cycle: 1 });
+    const r = await svc.attemptCheck(item.id, { cycle: 1 });
     expect(r.outcome).toBe('judgement_required');
     expect(r.criterion).toBe('is the spec coherent?');
     // Item is still open until recordJudgement is called.
     expect(svc.checklist.getItem(item.id)?.state).toBe('open');
   });
 
-  it('recordJudgement(passed=true) marks the item passed', () => {
+  it('recordJudgement(passed=true) marks the item passed', async () => {
     const svc = new JobsService(freshDb());
     const job = svc.openJob({ title: 't', source: 's', why: 'y', cycle: 1, at_ms: 1 });
     const item = svc.addItem(job.id, {
       description: 'i',
       spec: { hooks: [{ name: 'always_pass' }], judgement: { criterion: 'x' } },
     });
-    svc.attemptCheck(item.id, { cycle: 1 });
+    await svc.attemptCheck(item.id, { cycle: 1 });
     svc.recordJudgement(item.id, { passed: true }, 1);
     expect(svc.checklist.getItem(item.id)?.state).toBe('passed');
   });
@@ -183,7 +185,7 @@ describe('Deferral validation (T180 / FR-036)', () => {
 /* ============================== T181 ============================== */
 
 describe('Partial close (T181 / FR-037)', () => {
-  it('3 passed + 1 deferred → closed_partial; deferred items persist', () => {
+  it('3 passed + 1 deferred → closed_partial; deferred items persist', async () => {
     const svc = new JobsService(freshDb());
     const job = svc.openJob({ title: 'compose plan', source: 'op', why: 'because', cycle: 1, at_ms: 1 });
     const items = [
@@ -193,7 +195,7 @@ describe('Partial close (T181 / FR-037)', () => {
       svc.addItem(job.id, { description: 'd', spec: spec('always_fail') }),
     ];
     // Pass three.
-    for (const i of items.slice(0, 3)) svc.attemptCheck(i.id, { cycle: 1 });
+    for (const i of items.slice(0, 3)) await svc.attemptCheck(i.id, { cycle: 1 });
     // Defer the fourth with a valid reason.
     const deferred = svc.defer(
       {
@@ -292,29 +294,29 @@ describe('Unblock flow (T182 / FR-038)', () => {
 /* ============================== T183 ============================== */
 
 describe('Autonomy-gated sign-off (T183 / FR-039)', () => {
-  it('autonomy=high closes the job immediately', () => {
+  it('autonomy=high closes the job immediately', async () => {
     const svc = new JobsService(freshDb());
     const job = svc.openJob({ title: 't', source: 's', why: 'y', cycle: 1, at_ms: 1 });
     const item = svc.addItem(job.id, { description: 'a', spec: spec('always_pass') });
-    svc.attemptCheck(item.id, { cycle: 1 });
+    await svc.attemptCheck(item.id, { cycle: 1 });
     const r = svc.close({ jobId: job.id, cycle: 2, at_ms: 2, autonomy: 'high' });
     expect(r.result).toBe('closed');
   });
 
-  it('autonomy=low without operatorApproved returns pending_operator', () => {
+  it('autonomy=low without operatorApproved returns pending_operator', async () => {
     const svc = new JobsService(freshDb());
     const job = svc.openJob({ title: 't', source: 's', why: 'y', cycle: 1, at_ms: 1 });
     const item = svc.addItem(job.id, { description: 'a', spec: spec('always_pass') });
-    svc.attemptCheck(item.id, { cycle: 1 });
+    await svc.attemptCheck(item.id, { cycle: 1 });
     const r = svc.close({ jobId: job.id, cycle: 2, at_ms: 2, autonomy: 'low' });
     expect(r.result).toBe('pending_operator');
   });
 
-  it('autonomy=low with operatorApproved closes', () => {
+  it('autonomy=low with operatorApproved closes', async () => {
     const svc = new JobsService(freshDb());
     const job = svc.openJob({ title: 't', source: 's', why: 'y', cycle: 1, at_ms: 1 });
     const item = svc.addItem(job.id, { description: 'a', spec: spec('always_pass') });
-    svc.attemptCheck(item.id, { cycle: 1 });
+    await svc.attemptCheck(item.id, { cycle: 1 });
     const r = svc.close({
       jobId: job.id,
       cycle: 2,
@@ -323,6 +325,111 @@ describe('Autonomy-gated sign-off (T183 / FR-039)', () => {
       operatorApproved: true,
     });
     expect(r.result).toBe('closed');
+  });
+
+  it('autonomy=high closes WITHOUT escalation flag', async () => {
+    const svc = new JobsService(freshDb());
+    const job = svc.openJob({ title: 't', source: 's', why: 'y', cycle: 1, at_ms: 1 });
+    const item = svc.addItem(job.id, { description: 'a', spec: spec('always_pass') });
+    await svc.attemptCheck(item.id, { cycle: 1 });
+    const r = svc.close({ jobId: job.id, cycle: 2, at_ms: 2, autonomy: 'high' });
+    expect(r.result).toBe('closed');
+    if (r.result === 'closed') expect(r.escalated).toBe(false);
+  });
+
+  it('autonomy=medium closes AND flags escalation for operator confirmation', async () => {
+    const svc = new JobsService(freshDb());
+    const job = svc.openJob({ title: 't', source: 's', why: 'y', cycle: 1, at_ms: 1 });
+    const item = svc.addItem(job.id, { description: 'a', spec: spec('always_pass') });
+    await svc.attemptCheck(item.id, { cycle: 1 });
+    const r = svc.close({ jobId: job.id, cycle: 2, at_ms: 2, autonomy: 'medium' });
+    expect(r.result).toBe('closed');
+    if (r.result === 'closed') {
+      expect(r.job.status).toBe('closed_full');
+      expect(r.escalated).toBe(true);
+    }
+  });
+});
+
+describe('Lattice-authored items (Item 8 / appendLatticeItem)', () => {
+  const ctx = { cycle: 1, at_ms: 1 };
+  function openJob(svc: JobsService) {
+    return svc.openJob({ title: 't', source: 'operator', why: 'y', cycle: 1, at_ms: 1 });
+  }
+
+  it('appends a lattice_appended item with a valid gate and audits it', () => {
+    const svc = new JobsService(freshDb());
+    const job = openJob(svc);
+    const traces: Array<Record<string, unknown>> = [];
+    const r = svc.appendLatticeItem(
+      job.id,
+      { description: 'a sub-step', gateType: 'file_exists', gateArgs: { path: '/x' } },
+      { ...ctx, trace: { write: (e) => traces.push(e as Record<string, unknown>) } },
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.item.source).toBe('lattice_appended');
+      expect(r.item.description).toBe('a sub-step');
+    }
+    expect(traces.some((t) => t.event === 'item_appended')).toBe(true);
+  });
+
+  it('rejects append to a closed job', () => {
+    const svc = new JobsService(freshDb());
+    const job = openJob(svc);
+    expect(svc.close({ jobId: job.id, cycle: 2, at_ms: 2, autonomy: 'high' }).result).toBe('closed');
+    const r = svc.appendLatticeItem(job.id, { description: 'x', gateType: 'file_exists' }, ctx);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.code).toBe('job_not_open');
+  });
+
+  it('rejects a gate type outside the vocabulary', () => {
+    const svc = new JobsService(freshDb());
+    const job = openJob(svc);
+    const r = svc.appendLatticeItem(job.id, { description: 'x', gateType: 'rm_rf_everything' }, ctx);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.code).toBe('invalid_gate');
+  });
+
+  it('rejects a non-existent blocker', () => {
+    const svc = new JobsService(freshDb());
+    const job = openJob(svc);
+    const r = svc.appendLatticeItem(job.id, { description: 'x', gateType: 'always_pass', blockedBy: 'nope' }, ctx);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.code).toBe('invalid_blocker');
+  });
+
+  it('rejects a blocker that belongs to a different job', () => {
+    const svc = new JobsService(freshDb());
+    const job1 = openJob(svc);
+    const job2 = openJob(svc);
+    const foreign = svc.addItem(job2.id, { description: 'b', spec: spec('always_pass') });
+    const r = svc.appendLatticeItem(job1.id, { description: 'x', gateType: 'always_pass', blockedBy: foreign.id }, ctx);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.code).toBe('invalid_blocker');
+  });
+
+  it('enforces the per-job append cap', () => {
+    const svc = new JobsService(freshDb());
+    const job = openJob(svc);
+    const cctx = { ...ctx, maxPerJob: 2 };
+    expect(svc.appendLatticeItem(job.id, { description: '1', gateType: 'always_pass' }, cctx).ok).toBe(true);
+    expect(svc.appendLatticeItem(job.id, { description: '2', gateType: 'always_pass' }, cctx).ok).toBe(true);
+    const third = svc.appendLatticeItem(job.id, { description: '3', gateType: 'always_pass' }, cctx);
+    expect(third.ok).toBe(false);
+    if (!third.ok) expect(third.code).toBe('append_cap');
+  });
+
+  it('a valid blocker chains the appended item (cannot pass until blocker passes)', async () => {
+    const svc = new JobsService(freshDb());
+    const job = openJob(svc);
+    const first = svc.addItem(job.id, { description: 'first', spec: spec('always_fail') });
+    const r = svc.appendLatticeItem(job.id, { description: 'second', gateType: 'always_pass', blockedBy: first.id }, ctx);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.item.blocked_by).toBe(first.id);
+      expect((await svc.attemptCheck(r.item.id, { cycle: 2 })).outcome).toBe('blocked');
+    }
   });
 });
 

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 
 import { actOne } from './act-gate.js';
 import { makeApiCapability } from './api-capability.js';
+import { makeAppendPlanItemAction, type AppendPlanItemInput } from './append-plan-item-action.js';
 import { Discovery } from './discovery.js';
 import { makeEchoSense } from './echo-sense.js';
 import { FactoryRegistry, loadManifest, type ManifestFile } from './manifest.js';
@@ -480,5 +481,48 @@ describe('makeApiCapability', () => {
       autonomy: 'medium',
     });
     expect(r).toEqual({ y: 42 });
+  });
+});
+
+/* ============================== Item 8 ============================== */
+
+describe('makeAppendPlanItemAction (Item 8)', () => {
+  const ctx: ActContext = {
+    cycle: 1,
+    lastReadAtMs: null,
+    abortSignal: new AbortController().signal,
+    budgetRemaining: 1000,
+    autonomy: 'medium',
+  };
+
+  it('forwards a valid input to the injected append callback', async () => {
+    let received: AppendPlanItemInput | null = null;
+    const cap = makeAppendPlanItemAction({
+      append: (input) => {
+        received = input;
+        return { ok: true, itemId: 'item-1' };
+      },
+    });
+    const r = await cap.invoke(
+      { jobId: 'job-1', description: 'do x', gate: { type: 'file_exists', args: { path: '/x' } }, blockedBy: 'b1' },
+      ctx,
+    );
+    expect(r).toEqual({ ok: true, itemId: 'item-1' });
+    expect(received!.jobId).toBe('job-1');
+    expect(received!.gate.type).toBe('file_exists');
+  });
+
+  it('throws when jobId is missing', async () => {
+    const cap = makeAppendPlanItemAction({ append: () => ({ ok: true }) });
+    await expect(
+      cap.invoke({ description: 'x', gate: { type: 'file_exists' } } as unknown as AppendPlanItemInput, ctx),
+    ).rejects.toThrow(/jobId/);
+  });
+
+  it('throws when gate.type is missing', async () => {
+    const cap = makeAppendPlanItemAction({ append: () => ({ ok: true }) });
+    await expect(
+      cap.invoke({ jobId: 'j', description: 'x', gate: {} } as unknown as AppendPlanItemInput, ctx),
+    ).rejects.toThrow(/gate/);
   });
 });

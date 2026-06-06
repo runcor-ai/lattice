@@ -9,7 +9,8 @@ function fresh() {
     CREATE TABLE plan_job (
       id TEXT PRIMARY KEY, opened_at_cycle INTEGER NOT NULL, opened_at_ms INTEGER NOT NULL,
       title TEXT NOT NULL, source TEXT NOT NULL,
-      status TEXT NOT NULL, closed_at_cycle INTEGER, closed_at_ms INTEGER, why TEXT NOT NULL
+      status TEXT NOT NULL, closed_at_cycle INTEGER, closed_at_ms INTEGER, why TEXT NOT NULL,
+      body TEXT NOT NULL DEFAULT ''
     );
     CREATE TABLE commitment (
       id TEXT PRIMARY KEY, description TEXT NOT NULL,

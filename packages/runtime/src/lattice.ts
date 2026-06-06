@@ -1,4 +1,4 @@
-import { makeCloseJobItemAction, type Capability } from '@runcor/capabilities';
+import { makeAppendPlanItemAction, makeCloseJobItemAction, type Capability } from '@runcor/capabilities';
 import { selectDecider, type Decider } from '@runcor/decider';
 import { DialecticDecider } from '@runcor/dialectic';
 import type { ModelBackend } from '@runcor/engine';
@@ -42,6 +42,8 @@ export interface LatticeOptions {
   readonly dialecticDepth?: number;
   /** Override the constructed decider entirely. Tests use this to inject mocks. */
   readonly decider?: Decider;
+  /** Item 1 — run the fast/medium memory clocks each cycle. Defaults to true. */
+  readonly memoryClocks?: boolean;
 }
 
 /**
@@ -67,6 +69,7 @@ export class Lattice {
   private cycleCount: number;
   autonomy: AutonomyLevel;
   decider: Decider;
+  readonly memoryClocks: boolean;
 
   constructor(opts: LatticeOptions) {
     this.identity = opts.identity;
@@ -74,6 +77,7 @@ export class Lattice {
     this.senses = opts.senses ?? [];
     this.actions = opts.actions ?? [];
     this.autonomy = opts.autonomy ?? 'medium';
+    this.memoryClocks = opts.memoryClocks ?? true;
     this.decider =
       opts.decider ??
       selectDecider(
@@ -114,6 +118,37 @@ export class Lattice {
       }
       this.trace = new Trace(traceOpts);
       this.memory = new SqliteMemorySink(this.db);
+
+      // Item 10 — Layer 2 (init): promote one-time setup content into
+      // semantic memory ONCE, gated by a marker so a restart never
+      // re-runs it. It is never injected into per-cycle prompts; if it
+      // needs to persist, this is how (per the spec's Layer-2 rule).
+      const initLayer = opts.identity.initLayer?.trim();
+      if (initLayer) {
+        const already = this.db
+          .prepare(`SELECT 1 FROM memory_semantic WHERE source_ref = 'layer2-init' LIMIT 1`)
+          .get();
+        if (!already) {
+          this.memory.memory.write(
+            'semantic',
+            {
+              body: initLayer,
+              why: 'Layer-2 init content promoted to memory at startup (Item 10)',
+              admissionTag: 'decision',
+              source_kind: 'operator',
+              source_ref: 'layer2-init',
+            },
+            { cycle: this.cycleCount, at_ms: Date.now() },
+          );
+          this.trace.write({
+            kind: 'operator',
+            cycle: this.cycleCount,
+            at_ms: Date.now(),
+            action: 'lifecycle',
+            detail: `seed Layer 2 (init) promoted to semantic memory (${initLayer.length} chars)`,
+          });
+        }
+      }
     } catch (err) {
       // Open / migrate failed — release the lock so retry is possible.
       this.lock?.release();
@@ -152,7 +187,7 @@ export class Lattice {
         listOpenJobs: () =>
           jobs.checklist
             .listOpen()
-            .map((j) => ({ id: j.id, title: j.title, why: j.why })),
+            .map((j) => ({ id: j.id, title: j.title, why: j.why, body: j.body })),
         listOpenItems: (jobId: string) =>
           jobs.checklist
             .items(jobId)
@@ -172,8 +207,8 @@ export class Lattice {
       let actionsForCycle: readonly Capability<unknown, unknown>[] = this.actions;
       if (hasOpenJobs && !hasCloseAlready) {
         const closeAction = makeCloseJobItemAction({
-          attemptCheck: (itemId, attemptCtx) => {
-            const r = jobs.attemptCheck(itemId, attemptCtx);
+          attemptCheck: async (itemId, attemptCtx) => {
+            const r = await jobs.attemptCheck(itemId, attemptCtx);
             return {
               itemId,
               outcome: r.outcome,
@@ -181,7 +216,24 @@ export class Lattice {
             };
           },
         }) as Capability<unknown, unknown>;
-        actionsForCycle = [...this.actions, closeAction];
+        // Item 8 — let the lattice author its own items on its open jobs
+        // (same validation + audit as the bridge endpoint).
+        const appendAction = makeAppendPlanItemAction({
+          append: (input) => {
+            const res = jobs.appendLatticeItem(
+              input.jobId,
+              {
+                description: input.description,
+                gateType: input.gate.type,
+                ...(input.gate.args ? { gateArgs: input.gate.args } : {}),
+                blockedBy: input.blockedBy ?? null,
+              },
+              { cycle, at_ms: Date.now(), trace: this.trace },
+            );
+            return res.ok ? { ok: true, itemId: res.item.id } : { ok: false, reason: res.reason };
+          },
+        }) as Capability<unknown, unknown>;
+        actionsForCycle = [...this.actions, closeAction, appendAction];
       }
       const result = await runCycle({
         cycle,
@@ -197,6 +249,7 @@ export class Lattice {
         abortSignal,
         autonomy: this.autonomy,
         tasks,
+        memoryClocks: this.memoryClocks,
       });
       if (result.outcome === 'completed') {
         this.setCycleStmt.run(cycle);

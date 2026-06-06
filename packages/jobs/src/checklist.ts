@@ -17,12 +17,18 @@ interface NewJobArgs {
   readonly why: string;
   readonly cycle: number;
   readonly at_ms: number;
+  /** Item 10 — Layer-3 job body. Defaults to empty. */
+  readonly body?: string;
 }
 
 interface NewItemArgs {
   readonly description: string;
   readonly completion_check: string;
   readonly ordinal?: number;
+  /** Provenance; defaults to 'operator'. */
+  readonly source?: string;
+  /** Item 5 — id of a blocker item that must pass first. */
+  readonly blocked_by?: string | null;
 }
 
 interface CloseArgs {
@@ -64,8 +70,8 @@ export class Checklist {
 
   constructor(private readonly db: SqliteDb) {
     this.insertJob = db.prepare<[Job]>(
-      `INSERT INTO plan_job (id, opened_at_cycle, opened_at_ms, title, source, status, closed_at_cycle, closed_at_ms, why)
-       VALUES (@id, @opened_at_cycle, @opened_at_ms, @title, @source, @status, @closed_at_cycle, @closed_at_ms, @why)`,
+      `INSERT INTO plan_job (id, opened_at_cycle, opened_at_ms, title, source, status, closed_at_cycle, closed_at_ms, why, body)
+       VALUES (@id, @opened_at_cycle, @opened_at_ms, @title, @source, @status, @closed_at_cycle, @closed_at_ms, @why, @body)`,
     );
     this.closeJob = db.prepare<[CloseArgs & { id: string }]>(
       `UPDATE plan_job
@@ -81,10 +87,10 @@ export class Checklist {
     this.insertItem = db.prepare<[Item]>(
       `INSERT INTO plan_item (id, job_id, ordinal, description, state, iteration_count,
                               completion_check, passed_at_cycle, deferred_at_cycle,
-                              defer_reason, unblock_condition, unblock_test)
+                              defer_reason, unblock_condition, unblock_test, source, blocked_by)
        VALUES (@id, @job_id, @ordinal, @description, @state, @iteration_count,
                @completion_check, @passed_at_cycle, @deferred_at_cycle,
-               @defer_reason, @unblock_condition, @unblock_test)`,
+               @defer_reason, @unblock_condition, @unblock_test, @source, @blocked_by)`,
     );
     this.listItems = db.prepare<[string]>(
       `SELECT * FROM plan_item WHERE job_id = ? ORDER BY ordinal ASC`,
@@ -119,6 +125,7 @@ export class Checklist {
       closed_at_cycle: null,
       closed_at_ms: null,
       why: args.why,
+      body: args.body ?? '',
     };
     this.insertJob.run(job);
     return job;
@@ -148,6 +155,8 @@ export class Checklist {
       defer_reason: null,
       unblock_condition: null,
       unblock_test: null,
+      source: args.source ?? 'operator',
+      blocked_by: args.blocked_by ?? null,
     };
     this.insertItem.run(item);
     return item;

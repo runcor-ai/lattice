@@ -29,7 +29,7 @@ export interface ClosureRequest {
 }
 
 export type ClosureResult =
-  | { result: 'closed'; mode: ClosureMode; job: Job }
+  | { result: 'closed'; mode: ClosureMode; job: Job; escalated: boolean }
   | { result: 'pending_operator'; mode: ClosureMode; reason: string }
   | { result: 'not_ready'; reason: string };
 
@@ -71,7 +71,10 @@ export function attemptClose(
 
   checklist.closeJobWith(req.jobId, { status, cycle: req.cycle, at_ms: req.at_ms });
   const refreshed = checklist.getJob(req.jobId)!;
-  return { result: 'closed', mode, job: refreshed };
+  // autonomy=medium closes itself but flags an escalation so the
+  // operator sees the close post-hoc (FR-039). high closes silently;
+  // low never reaches here without operatorApproved (handled above).
+  return { result: 'closed', mode, job: refreshed, escalated: req.autonomy === 'medium' };
 }
 
 function itemsSummary(items: readonly Item[]): string {

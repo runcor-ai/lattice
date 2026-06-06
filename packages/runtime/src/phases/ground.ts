@@ -46,7 +46,16 @@ export async function ground(
 
   const actionMenu = renderActionMenu(ctx.actions);
   const tasksBlock = renderTasksBlock(ctx.tasks);
-  const recentActionsBlock = renderRecentActions(ctx.recall);
+  // Item 10 — Layer 3: the active job's body, swapped in per job (empty
+  // when no job is active).
+  const jobBodyBlock = renderJobBody(ctx.tasks);
+  // Item 1 — prefer the fast-clock situation report (a synthesized "here
+  // is where we are") over re-injecting raw cycle history. Falls back to
+  // the raw recent-actions block before the first fast-clock tick.
+  const situation = ctx.recall.currentSituation();
+  const contextBlock = situation
+    ? `situation (your running summary — trust this over re-deriving state from scratch):\n${situation}`
+    : renderRecentActions(ctx.recall);
 
   const groundedPrompt = wrap({
     cycle: ctx.cycle,
@@ -54,7 +63,8 @@ export async function ground(
     identityComposed: ctx.identity.composed_body,
     realitySliceSummary: [
       `senses:\n${senseSummary || '(none enabled)'}`,
-      recentActionsBlock,
+      contextBlock,
+      jobBodyBlock,
       tasksBlock,
     ]
       .filter((s) => s.length > 0)
@@ -177,6 +187,18 @@ function renderRecentActions(recall: MemoryRecallView): string {
 function truncate(s: string, max: number): string {
   if (s.length <= max) return s;
   return `${s.slice(0, max - 1)}…`;
+}
+
+/**
+ * Item 10 — Layer 3: surface the active job's body. The first open job
+ * with non-empty body content is treated as active (the spec assumes one
+ * active job at a time). Empty when no job is active.
+ */
+function renderJobBody(tasks: TasksView | undefined): string {
+  if (!tasks) return '';
+  const active = tasks.listOpenJobs().find((j) => j.body && j.body.trim().length > 0);
+  if (!active) return '';
+  return `current job (Layer 3 — "${active.title}"):\n${active.body.trim()}`;
 }
 
 function renderTasksBlock(tasks: TasksView | undefined): string {

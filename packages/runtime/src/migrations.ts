@@ -292,6 +292,51 @@ export const MIGRATIONS: readonly Migration[] = [
       );
     `,
   },
+  {
+    version: 15,
+    description: 'plan_item.source — provenance of an item (operator | system | lattice_appended). Items 4 & 8.',
+    sql: `
+      ALTER TABLE plan_item ADD COLUMN source TEXT NOT NULL DEFAULT 'operator';
+    `,
+  },
+  {
+    version: 16,
+    description: 'plan_item.blocked_by — ordered chaining; an item cannot pass until its blocker passes. Item 5.',
+    sql: `
+      ALTER TABLE plan_item ADD COLUMN blocked_by TEXT REFERENCES plan_item(id);
+    `,
+  },
+  {
+    version: 17,
+    description: 'recent_action — rolling window of dispatched actions for the Persistence substrate law. Item 6.',
+    sql: `
+      CREATE TABLE recent_action (
+        cycle       INTEGER NOT NULL,
+        action_name TEXT    NOT NULL,
+        input_hash  TEXT    NOT NULL
+      );
+      CREATE INDEX recent_action_lookup ON recent_action (action_name, input_hash, cycle);
+    `,
+  },
+  {
+    version: 18,
+    description: 'situation_current — the fast-clock running situation report (singleton). Item 1.',
+    sql: `
+      CREATE TABLE situation_current (
+        id               TEXT PRIMARY KEY CHECK (id = 'self'),
+        body             TEXT NOT NULL,
+        updated_at_cycle INTEGER NOT NULL,
+        updated_at_ms    INTEGER NOT NULL
+      );
+    `,
+  },
+  {
+    version: 19,
+    description: 'plan_job.body — the job-body content surfaced as the per-cycle Layer-3 block. Item 10.',
+    sql: `
+      ALTER TABLE plan_job ADD COLUMN body TEXT NOT NULL DEFAULT '';
+    `,
+  },
 ];
 
 export function appliedVersions(db: Db): Set<number> {

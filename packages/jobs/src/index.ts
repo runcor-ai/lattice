@@ -22,4 +22,13 @@ export {
   type ClosureRequest,
   type ClosureResult,
 } from './sign-off.js';
-export { JobsService, type CheckAttemptResult } from './service.js';
+export { JobsService, type CheckAttemptResult, type AppendResult } from './service.js';
+export {
+  PLAN_MIN_BYTES,
+  PLAN_CHECKBOX_REGEX,
+  PLAN_ITEM_TITLE,
+  planRelPath,
+  planItemGateSpec,
+  planItemDescription,
+} from './plan-gate.js';
+export { parsePlanSteps, onPlanFileReady, type PlanStep } from './plan-chain.js';
