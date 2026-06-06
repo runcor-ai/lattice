@@ -186,6 +186,7 @@ Ships with these capability factories:
 | `makeShellExecAction` | `shell-exec` | Run one shell command in a jailed cwd. Safety: an allowlist of permitted first-token verbs (default: read-only inspection: grep/find/ls/cat/git/npm/node/pnpm/jq/tree/...). Operators wanting broader power must opt in explicitly |
 | `makeClaudeDelegateAction` | `claude-delegate` | Spawn a fresh `claude --print` subprocess in a configured workdir with its own Read/Write/Bash tools. The pattern that makes engineering work practical: the lattice plans narrow subtasks; CC executes |
 | `makeCloseJobItemAction` | (built-in, auto-injected when the lattice has open jobs) | Lattice's own R++ way to mark an item closed via `JobsService.attemptCheck` |
+| `makeAppendPlanItemAction` | (built-in, auto-injected when the lattice has open jobs) | Lattice appends its **own** gated items to an open job — refine a step into sub-steps, or capture missed work — through the same validation + audit as the bridge endpoint |
 | `makeApiCapability` | `api` | (Slice 10 stub — extend per [`docs/extending.md`](docs/extending.md)) |
 | `makeMcpCapability` | `mcp` | (Slice 10 stub — extend per [`docs/extending.md`](docs/extending.md)) |
 
@@ -249,10 +250,17 @@ The job model lives in [`packages/jobs/`](packages/jobs/).
 | `always_fail` | none | Never (for testing) |
 | `description_contains` | `{ needle: string }` | Item description contains `needle` |
 | `file_exists` | `{ path: string, minBytes?: int }` | `path` is an absolute path to a regular file with size ≥ `minBytes` |
+| `content_contains` | `{ path, needle, isRegex? }` | File at `path` contains `needle` (substring, or regex when `isRegex: true`) |
+| `command_exits_zero` | `{ command, cwd, timeoutMs? }` | Runs `command` in the **shell-exec sandbox** (same allowlist/cwd-jail); passes on exit 0 |
+| `http_status_is` | `{ url, status? }` | Fetches `url`; passes when the response status equals `status` (default 200) |
 
 Custom hooks are easy: pass a configured `CheckRegistry` into
-`JobsService` and `.register('your-hook', fn)`. Synchronous only,
-per Principle V — judgement goes to the LLM, not hooks.
+`JobsService` and `.register('your-hook', fn, { costly? })`. Hooks may be
+async — `command_exits_zero` / `http_status_is` are inherently so. Costly
+hooks are **tiered out of the every-cycle auto-sweep** and only run on an
+explicit close attempt, so the subconscious sweep never spawns a shell or
+makes a network call inside the cycle transaction. Judgement still goes to
+the LLM, not hooks (Principle V).
 
 **Item auto-close:** every cycle, the write phase's subconscious
 sweep runs `attemptCheck` with `mode='auto'` on every open item.
@@ -270,8 +278,8 @@ deterministic sweep exhausted budget before deliverables existed.)
 The operator's job is small:
 
 1. **Boot the bridge** — `pnpm bridge:start`. Single-tenant, 127.0.0.1 by default.
-2. **Instantiate a lattice** — `POST /api/lattices` with name + identity_seed + tool_manifest + model_backend. Optional `bundle_id` seeds memory from a prebuilt role.
-3. **Hand it a job** — `POST /api/lattices/:id/jobs` with title + why + items. Each item gets a completion_check (file_exists is the workhorse).
+2. **Instantiate a lattice** — `POST /api/lattices` with name + identity_seed + tool_manifest + model_backend. Optional: `persona_bundles` (ordered Layer-1 fragments from `prebuilt/_personas/`), `init_seed` (Layer-2 one-time setup), `bundle_id` (seed memory from a prebuilt role), `resume_from_path` (reopen an existing entity).
+3. **Hand it a job** — `POST /api/lattices/:id/jobs` with title + why + body + items. A gated **checklist-plan** item is auto-inserted first; the job won't close until the lattice writes its plan. Each item's completion_check uses the hook vocabulary (`file_exists` is the workhorse). The lattice can append its own items via `POST /api/lattices/:id/jobs/:job_id/items`.
 4. **Watch** — `GET /api/lattices/:id/trace/stream` (SSE) or the Vue UI. Every cycle is visible.
 5. **Adjust if needed** — `PATCH /api/lattices/:id/dials` (autonomy / etc) with a required `why`. `POST .../actions/{pause,resume,stop,swap-backend}`.
 6. **Resume across restarts** — `POST /api/lattices` with `resume_from_path` pointing at the entity's SQLite. Same id, same memory, same cycle counter.
@@ -327,6 +335,41 @@ Every fix above is fundamental to the lattice runtime, never
 task-specific. The seven-run history in
 [`docs/worked-example-run/README.md`](docs/worked-example-run/README.md)
 walks through what was caught and what was changed.
+
+A subsequent change set (the *lattice-changes* spec; grounding +
+follow-ups in
+[`specs/001-lattice-core/lattice-changes-grounding.md`](specs/001-lattice-core/lattice-changes-grounding.md))
+layered on the upgrades below — all runtime-fundamental:
+
+**The plan binds behaviour.** Prose describes; items are law.
+- A job's first item is an auto-inserted **gated checklist plan** —
+  the job cannot close until a real plan file (`.ai/notes/plans/<job>.md`,
+  with checkbox steps) exists.
+- Each checkbox becomes its own **ordered, chained `plan_item`** (step N
+  blocked until N−1 passes), gated by a machine-checkable definition of
+  done the lattice declares from the hook vocabulary above.
+- The lattice **authors its own gated items** mid-run, in-process or via
+  `POST /api/lattices/:id/jobs/:job_id/items`.
+- Auto-close + close-error observability + **idle-pause** (a lattice with
+  no open jobs stops cycling and resumes when a job arrives) retire the
+  "noop forever" failure mode.
+
+**Three-clock memory.** The slow clock (consolidation) gains two faster,
+Claude-powered clocks: a **fast clock** every cycle that rewrites a running
+"situation report" the next prompt reads instead of re-deriving from raw
+history, and a **medium clock** that compacts episodic memory into a
+mid-horizon record. (`LatticeOptions.memoryClocks`, default on.)
+
+**Identity as cadenced layers + composable bundles.** The seed is split by
+cadence — **Layer 1** (persona, every cycle), **Layer 2** (`init_seed`,
+promoted to memory once at startup), **Layer 3** (the active job's body,
+per-job). Layer 1 is composed from ordered, reusable **persona bundles**
+(`prebuilt/_personas/*.md`, declared via `persona_bundles` at instantiate)
+plus the operator's own seed.
+
+**Persistence substrate law.** The runtime refuses to dispatch the same
+action with the same inputs twice inside a rolling window — enforcement at
+the dispatch layer, not advice in a prompt.
 
 ---
 
