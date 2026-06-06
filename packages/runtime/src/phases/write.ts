@@ -1,6 +1,9 @@
+import { JobsService, type ClosureResult } from '@runcor/jobs';
 import { runSubconsciousSweep } from '@runcor/memory';
-import { JobsService } from '@runcor/jobs';
+import type { AutonomyLevel } from '@runcor/substrate';
+import type { TraceEntry } from '@runcor/trace';
 
+import { MEDIUM_CLOCK_EVERY, runFastClock, runMediumClock } from '../memory-clocks.js';
 import type { RuntimeMemoryAdapter } from '../sqlite-memory.js';
 import type { CycleContext, JudgeOutput, WriteOutput } from '../types.js';
 
@@ -97,7 +100,7 @@ export async function write(ctx: CycleContext, prev: JudgeOutput): Promise<Write
     for (const item of jobs.checklist.items(job.id)) {
       if (item.state !== 'open') continue;
       try {
-        const r = jobs.attemptCheck(item.id, { cycle: ctx.cycle, mode: 'auto' });
+        const r = await jobs.attemptCheck(item.id, { cycle: ctx.cycle, mode: 'auto' });
         if (r.outcome === 'passed') {
           autoClosed += 1;
           ctx.trace.write({
@@ -113,9 +116,128 @@ export async function write(ctx: CycleContext, prev: JudgeOutput): Promise<Write
         /* swallow per-item check errors — one bad item must not break the cycle */
       }
     }
+
+    // Item 2 — auto-close the job itself. The item sweep above closes
+    // ITEMS; nothing closed the JOB. A job whose items have all passed
+    // sat in status='open' forever (the 773-cycle noop bug).
+    autoAttemptJobClose(jobs, job.id, ctx);
+  }
+
+  // Item 1 — fast/medium memory clocks, the post-write inter-cycle work.
+  // Fast every cycle (refresh the situation report the next prompt reads);
+  // medium every N cycles (compact episodic into a mid-horizon record).
+  // Wrapped so a model hiccup never breaks the cycle.
+  if (ctx.memoryClocks) {
+    try {
+      const cycleOutcome = [
+        `action=${prev.chosenAction ?? '(none)'}`,
+        `result=${prev.actResult}`,
+        `judgement=${prev.judgement}`,
+        prev.actFailedReason ? `failed=${prev.actFailedReason}` : '',
+      ]
+        .filter(Boolean)
+        .join('; ');
+      const recentContext = ctx.recall
+        .recentEpisodic(8)
+        .map((m) => `- ${m.body}`)
+        .join('\n');
+      await runFastClock({
+        db,
+        engine: ctx.engine,
+        cycle: ctx.cycle,
+        at_ms: ctx.at_ms,
+        identityComposed: ctx.identity.composed_body,
+        cycleOutcome,
+        recentContext,
+        abortSignal: ctx.abortSignal,
+      });
+      if (ctx.cycle % MEDIUM_CLOCK_EVERY === 0) {
+        const recentEpisodic = ctx.recall
+          .recentEpisodic(40)
+          .map((m) => `- ${m.body}`)
+          .join('\n');
+        await runMediumClock({
+          db,
+          engine: ctx.engine,
+          cycle: ctx.cycle,
+          at_ms: ctx.at_ms,
+          identityComposed: ctx.identity.composed_body,
+          recentEpisodic,
+          abortSignal: ctx.abortSignal,
+        });
+      }
+    } catch (err) {
+      ctx.trace.write({
+        kind: 'subconscious',
+        cycle: ctx.cycle,
+        at_ms: ctx.at_ms,
+        rule: 'memory-clock-error',
+        now: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   return { ...prev, memoryWrites: 1 + sweep.applied.length + autoClosed };
+}
+
+/** Minimal surface of JobsService the auto-close needs — keeps the
+ * helper unit-testable with a fake that can throw on demand. */
+interface CloseCapableJobs {
+  close(args: { jobId: string; cycle: number; at_ms: number; autonomy: AutonomyLevel }): ClosureResult;
+}
+/** Minimal cycle surface the auto-close needs. CycleContext satisfies it. */
+interface CloseCtx {
+  readonly cycle: number;
+  readonly at_ms: number;
+  readonly autonomy: AutonomyLevel;
+  readonly trace: { write(entry: TraceEntry): void };
+}
+
+/**
+ * Item 2/3 — attempt sign-off on one job after its items have been
+ * swept, under the cycle's autonomy dial:
+ *   - closed           → emit a `job` trace (closed_full|closed_partial);
+ *                        medium-autonomy closes carry an escalation note.
+ *   - pending_operator  → emit an observed `subconscious` trace (low autonomy).
+ *   - not_ready         → silent (normal: items still open).
+ *   - throws            → Item 3: trace `auto-close-error` and continue;
+ *                        one bad job must not break the cycle, but the
+ *                        failure must be VISIBLE, not swallowed silently.
+ */
+export function autoAttemptJobClose(jobs: CloseCapableJobs, jobId: string, ctx: CloseCtx): void {
+  try {
+    const c = jobs.close({ jobId, cycle: ctx.cycle, at_ms: ctx.at_ms, autonomy: ctx.autonomy });
+    if (c.result === 'closed') {
+      ctx.trace.write({
+        kind: 'job',
+        cycle: ctx.cycle,
+        at_ms: ctx.at_ms,
+        event: c.mode === 'full' ? 'closed_full' : 'closed_partial',
+        job_id: jobId,
+        detail: c.escalated
+          ? 'auto-closed under autonomy=medium; operator confirmation requested'
+          : `auto-closed under autonomy=${ctx.autonomy}`,
+      });
+    } else if (c.result === 'pending_operator') {
+      ctx.trace.write({
+        kind: 'subconscious',
+        cycle: ctx.cycle,
+        at_ms: ctx.at_ms,
+        rule: 'auto-attempt-job-close (observed, pending_operator)',
+        memory_id: jobId,
+        now: c.reason,
+      });
+    }
+  } catch (err) {
+    ctx.trace.write({
+      kind: 'subconscious',
+      cycle: ctx.cycle,
+      at_ms: ctx.at_ms,
+      rule: 'auto-close-error',
+      memory_id: jobId,
+      now: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 /**

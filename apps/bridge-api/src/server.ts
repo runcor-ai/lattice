@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 import fastifyStatic from '@fastify/static';
 import {
+  AppendItemSchema,
   CompanyInstantiateSchema,
   DialAdjustmentSchema,
   EscalationDecisionSchema,
@@ -17,8 +18,10 @@ import {
 import Fastify, { type FastifyInstance } from 'fastify';
 
 import { BundleLoader } from './bundle-loader.js';
+import { loadPersonaRegistry } from './persona-loader.js';
 import { SecretStore } from './secret-store.js';
 import { Supervisor } from './supervisor.js';
+import { ensureWorkspaceRoot } from './workspace.js';
 
 export interface BuildServerOptions {
   readonly dataDir: string;
@@ -46,12 +49,13 @@ export async function buildServer(opts: BuildServerOptions): Promise<BuiltServer
   });
 
   const secrets = opts.secrets ?? new SecretStore();
-  const bundles = new BundleLoader({
-    root: opts.prebuiltDir ?? join(process.cwd(), 'prebuilt'),
-  });
+  const prebuiltRoot = opts.prebuiltDir ?? join(process.cwd(), 'prebuilt');
+  const bundles = new BundleLoader({ root: prebuiltRoot });
+  const personas = loadPersonaRegistry(prebuiltRoot); // Item 11
 
   const supervisor = new Supervisor({
     dataDir: opts.dataDir,
+    personas,
     resolveApiKey: (provider) => {
       const s = secrets.load();
       if (provider === 'anthropic') return s.anthropicApiKey;
@@ -327,6 +331,11 @@ export async function buildServer(opts: BuildServerOptions): Promise<BuiltServer
     if (autonomyVal === 'low' || autonomyVal === 'medium' || autonomyVal === 'high') {
       r.lattice.autonomy = autonomyVal;
     }
+    // Item 9 — the pause-on-idle dial is mutable from the bridge.
+    const pauseVal = parsed.data.dials['pauseOnNoOpenJobs'];
+    if (typeof pauseVal === 'boolean') {
+      supervisor.setPauseOnNoOpenJobs(id, pauseVal);
+    }
     r.lattice.trace.write({
       kind: 'operator',
       cycle: r.lattice.completedCycle,
@@ -387,7 +396,7 @@ export async function buildServer(opts: BuildServerOptions): Promise<BuiltServer
     }
     // Hand the job to the lattice via the JobsService directly (the
     // lattice's decide phase will pick it up next cycle).
-    const { JobsService } = await import('@runcor/jobs');
+    const { JobsService, planRelPath, planItemGateSpec, planItemDescription } = await import('@runcor/jobs');
     const jobs = new JobsService(r.lattice.dbHandle());
     const job = jobs.openJob({
       title: parsed.data.title,
@@ -395,16 +404,64 @@ export async function buildServer(opts: BuildServerOptions): Promise<BuiltServer
       why: parsed.data.why,
       cycle: r.lattice.completedCycle,
       at_ms: Date.now(),
+      body: parsed.data.body, // Item 10 — Layer-3 job body
+    });
+    // Item 4 — force a checklist plan FIRST. The gated plan_item is
+    // inserted at ordinal 0 (ahead of any operator item) and marked
+    // system-inserted. The job cannot close until a real plan file with
+    // a checkbox exists at the gate path, which the lattice writes via
+    // its workspace write action (jailed to the same root).
+    const workspaceRoot = ensureWorkspaceRoot(r.sqlitePath, r.id);
+    const rel = planRelPath(job.id);
+    jobs.addItem(job.id, {
+      description: planItemDescription(rel),
+      spec: planItemGateSpec(join(workspaceRoot, rel)),
+      source: 'system',
     });
     if (parsed.data.items) {
       for (const item of parsed.data.items) {
         jobs.addItem(job.id, {
           description: item.description,
           spec: safeJson(item.completion_check) as { hooks: { name: string }[] },
+          source: 'operator',
         });
       }
     }
+    // Item 9 — if the lattice auto-paused for lack of open jobs, the new
+    // job wakes it back into the cycle loop.
+    supervisor.wake(id);
     return reply.code(201).send({ job_id: job.id });
+  });
+
+  /* --------------- Lattice-authored items (Item 8) --------------- */
+  app.post('/api/lattices/:id/jobs/:job_id/items', async (req, reply) => {
+    const { id, job_id } = req.params as { id: string; job_id: string };
+    const r = supervisor.get(id);
+    if (!r) return reply.code(404).send(errorBody('lattice_not_found', `no lattice ${id}`));
+    const parsed = AppendItemSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply
+        .code(400)
+        .send(errorBody('invalid_request', parsed.error.issues[0]?.message ?? 'invalid'));
+    }
+    const { JobsService } = await import('@runcor/jobs');
+    const jobs = new JobsService(r.lattice.dbHandle());
+    const result = jobs.appendLatticeItem(
+      job_id,
+      {
+        description: parsed.data.description,
+        gateType: parsed.data.gate.type,
+        ...(parsed.data.gate.args ? { gateArgs: parsed.data.gate.args } : {}),
+        blockedBy: parsed.data.blocked_by ?? null,
+      },
+      { cycle: r.lattice.completedCycle, at_ms: Date.now(), trace: r.lattice.trace },
+    );
+    if (!result.ok) {
+      const status =
+        result.code === 'job_not_found' ? 404 : result.code === 'job_not_open' ? 409 : result.code === 'append_cap' ? 429 : 400;
+      return reply.code(status).send(errorBody(result.code, result.reason));
+    }
+    return reply.code(201).send({ item_id: result.item.id });
   });
 
   /* --------------- Escalations --------------- */

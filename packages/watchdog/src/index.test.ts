@@ -26,7 +26,8 @@ function fresh() {
       iteration_count INTEGER NOT NULL DEFAULT 0,
       completion_check TEXT NOT NULL,
       passed_at_cycle INTEGER, deferred_at_cycle INTEGER,
-      defer_reason TEXT, unblock_condition TEXT, unblock_test TEXT
+      defer_reason TEXT, unblock_condition TEXT, unblock_test TEXT,
+      source TEXT NOT NULL DEFAULT 'operator', blocked_by TEXT
     );
     CREATE TABLE trace (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

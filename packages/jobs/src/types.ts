@@ -24,6 +24,8 @@ export interface Job {
   readonly closed_at_cycle: number | null;
   readonly closed_at_ms: number | null;
   readonly why: string;
+  /** Item 10 — Layer-3 job-body content surfaced in the per-cycle prompt while this job is active. */
+  readonly body: string;
 }
 
 export interface Item {
@@ -39,6 +41,10 @@ export interface Item {
   readonly defer_reason: string | null;
   readonly unblock_condition: string | null;
   readonly unblock_test: string | null;
+  /** Provenance: 'operator' (default), 'system' (auto-inserted gate, Item 4), 'plan_step' (Item 5), 'lattice_appended' (Item 8). */
+  readonly source: string;
+  /** Item 5 — id of the item that must pass before this one can. null = unblocked. */
+  readonly blocked_by: string | null;
 }
 
 /**

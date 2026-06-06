@@ -8,6 +8,7 @@
   "exclude": ["**/*.test.ts", "dist"],
   "references": [
     { "path": "../../packages/bridge-shared" },
+    { "path": "../../packages/identity" },
     { "path": "../../packages/runtime" },
     { "path": "../../packages/trace" },
     { "path": "../../packages/engine" },

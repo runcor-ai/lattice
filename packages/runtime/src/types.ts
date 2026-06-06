@@ -22,8 +22,18 @@ export type { CyclePhase };
 export type { AutonomyLevel, RppPrompt };
 
 export interface LatticeIdentity {
-  /** R++ body inserted into ground in slice 5 onward. Slice 1 carries it as plain text. */
+  /**
+   * Item 10 — the three seed layers, separated by cadence:
+   *   - Layer 1 (persona): `composed_body`, injected into EVERY cycle's
+   *     prompt as the identity assertion. Stable "who this lattice is".
+   *   - Layer 2 (init): `initLayer`, one-time setup persisted into memory
+   *     ONCE at startup, never re-sent into per-cycle prompts.
+   *   - Layer 3 (job body): not stored here — it is the active job's
+   *     `body`, swapped in per job by the prompt builder (ground.ts).
+   */
   readonly composed_body: string;
+  /** Layer 2 — one-time init content, promoted to memory at startup. */
+  readonly initLayer?: string;
 }
 
 /**
@@ -59,6 +69,8 @@ export interface MemorySink {
  */
 export interface MemoryRecallView {
   recentEpisodic(limit: number): readonly MemoryWrite[];
+  /** Item 1 — the latest fast-clock situation report, or null before the first. */
+  currentSituation(): string | null;
 }
 
 /**
@@ -67,8 +79,8 @@ export interface MemoryRecallView {
  * Implemented by JobsService (the runtime composes one per cycle).
  */
 export interface TasksView {
-  /** Open jobs in opened-at order. */
-  listOpenJobs(): readonly { id: string; title: string; why: string }[];
+  /** Open jobs in opened-at order. `body` is the Item 10 Layer-3 content. */
+  listOpenJobs(): readonly { id: string; title: string; why: string; body: string }[];
   /** Open items for a given job (status === 'open'). */
   listOpenItems(jobId: string): readonly { id: string; description: string; iteration_count: number }[];
 }
@@ -91,6 +103,8 @@ export interface CycleContext {
   readonly autonomy: AutonomyLevel;
   /** Optional tasks view; if absent, ground.ts skips the open-jobs section. */
   readonly tasks?: TasksView;
+  /** Item 1 — when true, the write phase runs the fast/medium memory clocks. */
+  readonly memoryClocks: boolean;
 }
 
 // Per-phase outputs (each phase's output is the next phase's input).

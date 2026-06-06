@@ -1,4 +1,6 @@
-import { existsSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
+
+import { runShellCommand } from '@runcor/capabilities';
 
 import type { CheckOutcome, CompletionCheckSpec, DeterministicHook, Item } from './types.js';
 
@@ -16,9 +18,14 @@ import type { CheckOutcome, CompletionCheckSpec, DeterministicHook, Item } from 
  * from "how to check it" (code, in the registry).
  */
 
+export type HookResult = boolean | { passed: boolean; reason?: string };
+
 export interface HookFn {
-  /** Synchronous hooks only — Principle V (no judgement). */
-  (args: Readonly<Record<string, unknown>>, ctx: HookContext): boolean | { passed: boolean; reason?: string };
+  /**
+   * Deterministic, no LLM judgement (Principle V). May be async: Item 7
+   * adds command/HTTP gates that are inherently asynchronous.
+   */
+  (args: Readonly<Record<string, unknown>>, ctx: HookContext): HookResult | Promise<HookResult>;
 }
 
 export interface HookContext {
@@ -26,15 +33,27 @@ export interface HookContext {
   readonly cycle: number;
 }
 
-export class CheckRegistry {
-  private readonly hooks = new Map<string, HookFn>();
+export interface HookRegistration {
+  readonly fn: HookFn;
+  /**
+   * Item 7 tiered execution — when true the hook does real I/O (spawns a
+   * command, makes an HTTP call) and is too expensive to run on the
+   * every-cycle subconscious sweep. Costly hooks are SKIPPED in `auto`
+   * mode and only evaluated on an explicit close attempt (`lattice`
+   * mode). Cheap hooks (file reads, string checks) run in both.
+   */
+  readonly costly: boolean;
+}
 
-  register(name: string, fn: HookFn): this {
-    this.hooks.set(name, fn);
+export class CheckRegistry {
+  private readonly hooks = new Map<string, HookRegistration>();
+
+  register(name: string, fn: HookFn, opts: { costly?: boolean } = {}): this {
+    this.hooks.set(name, { fn, costly: opts.costly ?? false });
     return this;
   }
 
-  get(name: string): HookFn | undefined {
+  get(name: string): HookRegistration | undefined {
     return this.hooks.get(name);
   }
 }
@@ -74,7 +93,87 @@ export function builtinRegistry(): CheckRegistry {
           reason: `file_exists: stat failed for ${path}: ${err instanceof Error ? err.message : String(err)}`,
         };
       }
-    });
+    })
+    /**
+     * `content_contains` — passes when a file exists and contains a
+     * substring, or matches a regex when `isRegex` is set. Use it to gate
+     * on a file's CONTENT, not just its presence:
+     *   { name: "content_contains", args: { path: "...", needle: "- [ ]" } }
+     *   { name: "content_contains", args: { path: "...", needle: "^- \\[[ x]\\]", isRegex: true } }
+     * Cheap (one file read) — runs in the subconscious sweep.
+     */
+    .register('content_contains', (args) => {
+      const path = typeof args.path === 'string' ? args.path : '';
+      const needle = typeof args.needle === 'string' ? args.needle : '';
+      if (!path) return { passed: false, reason: 'content_contains: args.path (string) is required' };
+      if (!needle) return { passed: false, reason: 'content_contains: args.needle (string) is required' };
+      if (!existsSync(path)) return { passed: false, reason: `content_contains: not found: ${path}` };
+      let text: string;
+      try {
+        text = readFileSync(path, 'utf8');
+      } catch (err) {
+        return { passed: false, reason: `content_contains: read failed for ${path}: ${err instanceof Error ? err.message : String(err)}` };
+      }
+      const hit = args.isRegex === true ? new RegExp(needle, 'm').test(text) : text.includes(needle);
+      return hit
+        ? true
+        : { passed: false, reason: `content_contains: ${path} does not ${args.isRegex === true ? 'match' : 'contain'} "${needle}"` };
+    })
+    /**
+     * `command_exits_zero` — COSTLY. Runs a command in the same sandbox
+     * the `shell-exec` capability uses (allowlisted first-token verb,
+     * cwd-jailed, timed out) and passes when it exits 0:
+     *   { name: "command_exits_zero", args: { command: "npm test", cwd: "C:/.../proj" } }
+     * Tiered: skipped in the auto sweep, evaluated only on an explicit
+     * close attempt. Reuses the one sandboxed runner — no new exec path.
+     */
+    .register(
+      'command_exits_zero',
+      async (args) => {
+        const command = typeof args.command === 'string' ? args.command : '';
+        const cwd = typeof args.cwd === 'string' ? args.cwd : '';
+        if (!command) return { passed: false, reason: 'command_exits_zero: args.command (string) is required' };
+        if (!cwd) return { passed: false, reason: 'command_exits_zero: args.cwd (absolute path) is required' };
+        try {
+          const res = await runShellCommand({
+            command,
+            cwd,
+            ...(Array.isArray(args.allowedVerbs) ? { allowedVerbs: args.allowedVerbs as string[] } : {}),
+            ...(typeof args.timeoutMs === 'number' ? { timeoutMs: args.timeoutMs } : {}),
+          });
+          return res.exitCode === 0
+            ? true
+            : { passed: false, reason: `command_exits_zero: "${command}" exited ${res.exitCode}` };
+        } catch (err) {
+          return { passed: false, reason: `command_exits_zero: ${err instanceof Error ? err.message : String(err)}` };
+        }
+      },
+      { costly: true },
+    )
+    /**
+     * `http_status_is` — COSTLY. Fetches a URL and passes when the
+     * response status equals `status` (default 200):
+     *   { name: "http_status_is", args: { url: "http://localhost:8080/health" } }
+     *   { name: "http_status_is", args: { url: "...", status: 204 } }
+     * Tiered like command_exits_zero — explicit-close only.
+     */
+    .register(
+      'http_status_is',
+      async (args) => {
+        const url = typeof args.url === 'string' ? args.url : '';
+        const want = typeof args.status === 'number' ? args.status : 200;
+        if (!url) return { passed: false, reason: 'http_status_is: args.url (string) is required' };
+        try {
+          const res = await fetch(url, { method: typeof args.method === 'string' ? args.method : 'GET' });
+          return res.status === want
+            ? true
+            : { passed: false, reason: `http_status_is: ${url} returned ${res.status}, want ${want}` };
+        } catch (err) {
+          return { passed: false, reason: `http_status_is: ${err instanceof Error ? err.message : String(err)}` };
+        }
+      },
+      { costly: true },
+    );
 }
 
 export function parseSpec(serialized: string): CompletionCheckSpec {
@@ -102,17 +201,28 @@ export function serializeSpec(spec: CompletionCheckSpec): string {
  *   - `judgement_required(criterion)` → all hooks passed AND a
  *     judgement pass is configured; the caller runs the decider.
  */
-export function runDeterministicHooks(
+export async function runDeterministicHooks(
   spec: CompletionCheckSpec,
   registry: CheckRegistry,
-  ctx: HookContext,
-): CheckOutcome {
+  ctx: HookContext & { mode?: 'lattice' | 'auto' },
+): Promise<CheckOutcome> {
+  const mode = ctx.mode ?? 'lattice';
   for (const h of spec.hooks) {
-    const fn = registry.get(h.name);
-    if (!fn) {
+    const reg = registry.get(h.name);
+    if (!reg) {
       return { result: 'failed', reason: `unknown hook: ${h.name}` };
     }
-    const out = fn(h.args ?? {}, ctx);
+    if (reg.costly && mode === 'auto') {
+      // Item 7 tiered execution — the every-cycle sweep does not spawn
+      // commands or make HTTP calls. The item stays open until the
+      // lattice explicitly attempts close (lattice mode), which runs the
+      // costly gate. Reported as failed so the item cannot auto-pass.
+      return {
+        result: 'failed',
+        reason: `${h.name}: costly gate deferred to explicit close (not run in auto sweep)`,
+      };
+    }
+    const out = await reg.fn(h.args ?? {}, { item: ctx.item, cycle: ctx.cycle });
     if (out === false || (typeof out === 'object' && !out.passed)) {
       const reason = typeof out === 'object' && out.reason ? out.reason : `${h.name} failed`;
       return { result: 'failed', reason };
@@ -126,6 +236,12 @@ export function runDeterministicHooks(
 
 export function defaultIterationCap(spec: CompletionCheckSpec): number {
   return spec.iterationCap ?? 5;
+}
+
+/** Item 8 — is `name` part of the built-in gate vocabulary the lattice
+ * may author? Used to reject invalid gate types on lattice-appended items. */
+export function isKnownHook(name: string): boolean {
+  return builtinRegistry().get(name) !== undefined;
 }
 
 export type { DeterministicHook };

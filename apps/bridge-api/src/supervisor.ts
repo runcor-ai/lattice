@@ -25,8 +25,22 @@ import {
   StubBackend,
   type ModelBackend,
 } from '@runcor/engine';
+import { composePersona, PersonaBundleRegistry } from '@runcor/identity';
 import { Memory } from '@runcor/memory';
 import { Lattice, type LatticeOptions } from '@runcor/runtime';
+
+import { ensureWorkspaceRoot } from './workspace.js';
+
+/**
+ * Item 4 — appended to every instantiated lattice's seed so it both
+ * WANTS to plan (this line) and is GATED into planning (the auto-inserted
+ * plan_item). Item 10 will fold this into the Layer-1 persona properly.
+ */
+const PLANNING_DISPOSITION =
+  '\n\nOn a new job, my first cycle drafts a checklist plan — a list of `- [ ]` steps — ' +
+  'to my workspace before I act on anything else. When I discover work the plan missed, ' +
+  'or need to break a step into sub-steps, I append a gated item to the job rather than ' +
+  'doing the work untracked.';
 
 /**
  * Supervisor — manages the set of running lattices the Bridge owns.
@@ -47,6 +61,8 @@ export interface SupervisorOptions {
   readonly dataDir: string;
   /** Secret resolver (closure over SecretStore.load()). */
   readonly resolveApiKey?: (provider: 'anthropic' | 'openai') => string | undefined;
+  /** Item 11 — persona bundle registry for composing Layer 1. */
+  readonly personas?: PersonaBundleRegistry;
 }
 
 interface Record {
@@ -55,15 +71,25 @@ interface Record {
   readonly sqlitePath: string;
   readonly lattice: Lattice;
   readonly modelBackendKind: ModelBackendSpec['kind'];
-  status: 'running' | 'paused' | 'stopped' | 'crashed';
+  status: 'running' | 'paused' | 'stopped' | 'crashed' | 'paused_no_jobs';
   loopController: AbortController | null;
   loopPromise: Promise<unknown> | null;
+  /**
+   * Item 9 — when true (default), the lattice auto-pauses cycling once
+   * it has had ≥1 job and none remain open (the noop-forever fix Item 2
+   * starts: Item 2 stops cycling on done work, Item 9 stops cycling when
+   * there's no work). Toggleable from the bridge dials. A lattice that
+   * has never had a job keeps running until its first job arrives —
+   * "all jobs closed" requires jobs to have existed.
+   */
+  pauseOnNoOpenJobs: boolean;
 }
 
 export class Supervisor {
   private readonly records = new Map<string, Record>();
   private readonly dataDir: string;
   private readonly resolveApiKey: SupervisorOptions['resolveApiKey'];
+  private readonly personas: PersonaBundleRegistry;
 
   constructor(opts: SupervisorOptions) {
     this.dataDir = opts.dataDir;
@@ -71,6 +97,7 @@ export class Supervisor {
       mkdirSync(this.dataDir, { recursive: true });
     }
     this.resolveApiKey = opts.resolveApiKey;
+    this.personas = opts.personas ?? new PersonaBundleRegistry();
   }
 
   list(): readonly RosterRow[] {
@@ -144,8 +171,32 @@ export class Supervisor {
     const engine = this.buildBackend(req.model_backend);
     const { senses, actions } = this.buildCapabilities(req.tool_manifest ?? []);
 
+    // Item 4 — every lattice gets a jailed workspace write-root so it can
+    // satisfy the auto-inserted plan gate (and write deliverables). The
+    // bridge job route stats the plan file under this same root. Paired
+    // with a listing sense so the lattice observes what it has written.
+    const workspaceRoot = ensureWorkspaceRoot(sqlitePath, id);
+    actions.push(makeFsWriteAction({ name: 'workspace', outDir: workspaceRoot }) as Capability<unknown, unknown>);
+    if (!senses.some((s) => s.name === 'workspace-listing')) {
+      senses.push(
+        makeFsReadSense({ name: 'workspace-listing', root: workspaceRoot }) as Capability<unknown, unknown>,
+      );
+    }
+
+    // Item 11 — Layer 1 is composed from the declared persona bundles with
+    // the operator's identity_seed appended last (so it refines the shared
+    // bundles). No bundles → the seed alone, unchanged (legacy path).
+    const personaLayer1 = composePersona(this.personas, req.persona_bundles ?? [], {
+      inline: req.identity_seed,
+    }).composed;
+
     const latticeOpts: LatticeOptions = {
-      identity: { composed_body: req.identity_seed },
+      // Item 10 — Layer 1 (persona) + dispositions; Layer 2 (init) is the
+      // optional init_seed, promoted to memory once.
+      identity: {
+        composed_body: personaLayer1 + PLANNING_DISPOSITION,
+        ...(req.init_seed ? { initLayer: req.init_seed } : {}),
+      },
       engine,
       senses,
       actions,
@@ -178,21 +229,62 @@ export class Supervisor {
       status: 'running',
       loopController: ctrl,
       loopPromise: null,
+      pauseOnNoOpenJobs: true,
     };
     this.records.set(id, record);
 
     // Kick off the continuous loop, but yield first so the response can be sent.
+    this.startLoop(record);
+
+    return { id, sqlitePath, pids: { fast: process.pid } };
+  }
+
+  /**
+   * Drive the lattice's cycle loop from the operator plane. The runtime's
+   * own loop (runUntilAborted) is exit-free by constitution (FR-003 /
+   * Principle I) — so the IDLE-PAUSE decision lives HERE, in the
+   * supervisor, exactly like a manual pause: we stop ticking and abort.
+   * The cognitive loop never decides to stop itself.
+   */
+  private startLoop(record: Record): void {
+    const ctrl = record.loopController;
+    if (!ctrl) return;
     record.loopPromise = (async () => {
       try {
-        await lattice.runUntilAborted(ctrl.signal);
+        while (!ctrl.signal.aborted) {
+          await record.lattice.runOnce(ctrl.signal);
+          if (record.pauseOnNoOpenJobs && this.shouldIdlePause(record.lattice)) {
+            record.status = 'paused_no_jobs';
+            record.lattice.trace.write({
+              kind: 'operator',
+              cycle: record.lattice.completedCycle,
+              at_ms: Date.now(),
+              action: 'lifecycle',
+              detail: 'paused_no_jobs_remaining',
+            });
+            return; // stop ticking; record stays alive; wake() restarts it
+          }
+          await new Promise<void>((resolve) => setImmediate(resolve));
+        }
       } catch (err) {
         record.status = 'crashed';
         // operational logging in slice 14 follow-up
         void err;
       }
     })();
+  }
 
-    return { id, sqlitePath, pids: { fast: process.pid } };
+  /**
+   * Item 9 — true when the lattice has had at least one job and none are
+   * open now. A jobless lattice (total = 0) returns false so it keeps
+   * cycling until its first job arrives.
+   */
+  private shouldIdlePause(lattice: Lattice): boolean {
+    const db = lattice.dbHandle();
+    const open = (db.prepare(`SELECT COUNT(*) AS n FROM plan_job WHERE status = 'open'`).get() as { n: number }).n;
+    if (open > 0) return false;
+    const total = (db.prepare(`SELECT COUNT(*) AS n FROM plan_job`).get() as { n: number }).n;
+    return total > 0;
   }
 
   pause(id: string): boolean {
@@ -209,15 +301,46 @@ export class Supervisor {
     if (!r) return false;
     if (r.status !== 'paused') return false;
     r.loopController = new AbortController();
-    const ctrl = r.loopController;
     r.status = 'running';
-    r.loopPromise = (async () => {
-      try {
-        await r.lattice.runUntilAborted(ctrl.signal);
-      } catch {
-        r.status = 'crashed';
-      }
-    })();
+    this.startLoop(r);
+    return true;
+  }
+
+  /**
+   * Item 9 — resume a lattice that auto-paused for lack of open jobs.
+   * Called when a new job is handed to it via the bridge. No-op unless
+   * the lattice is in the paused_no_jobs state.
+   */
+  wake(id: string): boolean {
+    const r = this.records.get(id);
+    if (!r) return false;
+    if (r.status !== 'paused_no_jobs') return false;
+    r.loopController = new AbortController();
+    r.status = 'running';
+    r.lattice.trace.write({
+      kind: 'operator',
+      cycle: r.lattice.completedCycle,
+      at_ms: Date.now(),
+      action: 'lifecycle',
+      detail: 'resumed_new_job_arrived',
+    });
+    this.startLoop(r);
+    return true;
+  }
+
+  /**
+   * Item 9 — toggle the auto-pause dial from the bridge. Turning it OFF
+   * while the lattice is idle-paused wakes it back into the running loop.
+   */
+  setPauseOnNoOpenJobs(id: string, value: boolean): boolean {
+    const r = this.records.get(id);
+    if (!r) return false;
+    r.pauseOnNoOpenJobs = value;
+    if (!value && r.status === 'paused_no_jobs') {
+      r.loopController = new AbortController();
+      r.status = 'running';
+      this.startLoop(r);
+    }
     return true;
   }
 

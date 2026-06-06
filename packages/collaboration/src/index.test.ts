@@ -23,7 +23,8 @@ function fresh() {
     CREATE TABLE plan_job (
       id TEXT PRIMARY KEY, opened_at_cycle INTEGER NOT NULL, opened_at_ms INTEGER NOT NULL,
       title TEXT NOT NULL, source TEXT NOT NULL, status TEXT NOT NULL,
-      closed_at_cycle INTEGER, closed_at_ms INTEGER, why TEXT NOT NULL
+      closed_at_cycle INTEGER, closed_at_ms INTEGER, why TEXT NOT NULL,
+      body TEXT NOT NULL DEFAULT ''
     );
     CREATE TABLE plan_item (
       id TEXT PRIMARY KEY, job_id TEXT NOT NULL, ordinal INTEGER NOT NULL,
@@ -31,7 +32,8 @@ function fresh() {
       iteration_count INTEGER NOT NULL DEFAULT 0,
       completion_check TEXT NOT NULL,
       passed_at_cycle INTEGER, deferred_at_cycle INTEGER,
-      defer_reason TEXT, unblock_condition TEXT, unblock_test TEXT
+      defer_reason TEXT, unblock_condition TEXT, unblock_test TEXT,
+      source TEXT NOT NULL DEFAULT 'operator', blocked_by TEXT
     );
     CREATE TABLE skill (
       id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL,

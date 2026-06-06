@@ -28,6 +28,7 @@
     "node": ">=22.0.0"
   },
   "dependencies": {
+    "@runcor/capabilities": "workspace:*",
     "@runcor/substrate": "workspace:*",
     "@runcor/trace": "workspace:*"
   },
