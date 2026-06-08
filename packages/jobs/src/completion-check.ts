@@ -120,6 +120,33 @@ export function builtinRegistry(): CheckRegistry {
         : { passed: false, reason: `content_contains: ${path} does not ${args.isRegex === true ? 'match' : 'contain'} "${needle}"` };
     })
     /**
+     * `step_acknowledged` — COSTLY. The gate for a plan step that declares
+     * no machine-checkable definition-of-done: a prose checkbox like
+     * "spot-check one category total" or "close item X" where there is no
+     * deliverable file to stat. Tiered like the other costly gates — the
+     * every-cycle subconscious sweep reports it deferred (never silently
+     * auto-passes), and it is satisfied ONLY on an explicit close-job-item
+     * attempt, where the lattice asserts the step is done and its `why` is
+     * recorded in the trace.
+     *
+     * This replaces the old ceremonial `.step-N.done` marker fallback. That
+     * marker was a content-free file that verified nothing about the
+     * deliverable — pass-by-assertion wearing a `file_exists` costume — and
+     * it deadlocked any job whose REAL deliverable gates were already
+     * satisfied: a lattice that produced the deliverable but (rightly, or
+     * via a poisoned summary) declined the ritual could never close. That
+     * is the marker-chase loop observed across util28 / t29 / data-25. The
+     * job's real deliverable items keep their own machine gates (file_exists,
+     * command_exits_zero, …); ordering is still enforced by blocked_by. This
+     * hook governs ONLY the prose scaffolding steps, and an explicit,
+     * justified close is strictly more auditable than an empty marker file.
+     */
+    .register(
+      'step_acknowledged',
+      () => ({ passed: true, reason: 'step acknowledged via explicit close-job-item' }),
+      { costly: true },
+    )
+    /**
      * `command_exits_zero` — COSTLY. Runs a command in the same sandbox
      * the `shell-exec` capability uses (allowlisted first-token verb,
      * cwd-jailed, timed out) and passes when it exits 0:
@@ -232,6 +259,89 @@ export async function runDeterministicHooks(
     return { result: 'judgement_required', criterion: spec.judgement.criterion };
   }
   return { result: 'passed' };
+}
+
+export interface GateSummary {
+  /**
+   * True when every cheap deterministic hook currently passes. False when a
+   * cheap hook fails, when the spec references an unknown hook, or when the
+   * item is gated ONLY by costly hooks (those are verified on an explicit
+   * close, so a pass cannot be asserted from the reality slice).
+   */
+  readonly passed: boolean;
+  /** Human-readable verdict, suitable for the reality slice. Always set. */
+  readonly reason: string;
+  /** True when ≥1 costly hook was intentionally NOT executed here. */
+  readonly deferred: boolean;
+}
+
+/**
+ * summarizeGate — a SYNCHRONOUS, side-effect-light read of an item's gate,
+ * for echoing ground truth next to each open item in the per-cycle reality
+ * slice (runtime ground phase). It runs only the CHEAP hooks (file/content/
+ * string — the same ones the auto sweep runs) and reports their live verdict
+ * verbatim. Costly hooks (command_exits_zero / http_status_is) are NOT run
+ * here — building the reality slice every cycle must not spawn processes or
+ * make network calls — they are reported as "verified on explicit close".
+ *
+ * Why this exists: a lattice's self-authored situation summary can drift to
+ * contradict ground truth and steer it onto a non-existent blocker (observed
+ * twice in endurance runs — see docs/endurance-run-stuck-summary). Echoing
+ * the gate's live reason beside each open item gives the model a machine-
+ * checked signal that contradicts a poisoned narrative in BOTH directions:
+ * "you believe you are blocked but the gate already passes — close it" and
+ * "you believe this is done but here is the exact file/condition missing".
+ */
+export function summarizeGate(
+  spec: CompletionCheckSpec,
+  registry: CheckRegistry,
+  item: Item,
+  cycle: number,
+): GateSummary {
+  let sawCheap = false;
+  let sawDeferred = false;
+  for (const h of spec.hooks) {
+    const reg = registry.get(h.name);
+    if (!reg) {
+      return { passed: false, reason: `unknown gate hook: ${h.name}`, deferred: false };
+    }
+    if (reg.costly) {
+      sawDeferred = true;
+      continue;
+    }
+    const out = reg.fn(h.args ?? {}, { item, cycle });
+    // Cheap hooks are synchronous by contract; if one unexpectedly returns a
+    // thenable we cannot await it while building the reality slice, so treat
+    // it as deferred rather than blocking the cycle.
+    const isThenable =
+      out !== null && typeof out === 'object' && typeof (out as { then?: unknown }).then === 'function';
+    if (isThenable) {
+      sawDeferred = true;
+      continue;
+    }
+    sawCheap = true;
+    const res = out as boolean | { passed: boolean; reason?: string };
+    if (res === false || (typeof res === 'object' && !res.passed)) {
+      const reason = typeof res === 'object' && res.reason ? res.reason : `${h.name} failed`;
+      return { passed: false, reason, deferred: sawDeferred };
+    }
+  }
+  if (!sawCheap) {
+    return sawDeferred
+      ? {
+          passed: false,
+          reason: 'costly gate — verified only on an explicit close-job-item attempt',
+          deferred: true,
+        }
+      : { passed: true, reason: 'no deterministic gate', deferred: false };
+  }
+  return {
+    passed: true,
+    reason: sawDeferred
+      ? 'cheap gates satisfied — a costly gate is still verified on explicit close'
+      : 'gate satisfied — close this item via close-job-item',
+    deferred: sawDeferred,
+  };
 }
 
 export function defaultIterationCap(spec: CompletionCheckSpec): number {

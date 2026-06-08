@@ -25,7 +25,13 @@ export interface BaseTraceEntry {
   at_ms: number;
 }
 
-export type TraceKind = 'phase' | 'subconscious' | 'job' | 'substrate' | 'operator';
+export type TraceKind =
+  | 'phase'
+  | 'subconscious'
+  | 'job'
+  | 'substrate'
+  | 'operator'
+  | 'cognition';
 
 export interface PhaseTraceEntry extends BaseTraceEntry {
   kind: 'phase';
@@ -86,9 +92,27 @@ export interface OperatorTraceEntry extends BaseTraceEntry {
   detail?: string;
 }
 
+/**
+ * Cognition — the lattice's actual thinking for a cycle: the grounded prompt
+ * that was sent to the model and the model's raw R++ reasoning (the decision
+ * source, including its BEHAVIOR Decide block). This is what makes the
+ * operator's "thoughts box" real rather than a summary. Emitted once per
+ * cycle by the decide phase. Both fields are truncated to keep the trace
+ * bounded; the full prompt/reasoning is not otherwise persisted.
+ */
+export interface CognitionTraceEntry extends BaseTraceEntry {
+  kind: 'cognition';
+  phase: 'decide';
+  action: string | null;
+  prompt: string;
+  reasoning: string;
+  truncated?: boolean;
+}
+
 export type TraceEntry =
   | PhaseTraceEntry
   | SubconsciousTraceEntry
   | JobTraceEntry
   | SubstrateTraceEntry
-  | OperatorTraceEntry;
+  | OperatorTraceEntry
+  | CognitionTraceEntry;

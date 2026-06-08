@@ -1,5 +1,11 @@
 import { actOne, type ActContext } from '@runcor/capabilities';
 
+import {
+  dominantRecentAction,
+  NO_PROGRESS_ESCALATE,
+  NO_PROGRESS_THRESHOLD,
+  readNoProgressCycles,
+} from '../no-progress.js';
 import { hashActionInput, isPersistenceViolation, PERSISTENCE_WINDOW, recordAction } from '../persistence.js';
 import type { RuntimeMemoryAdapter } from '../sqlite-memory.js';
 import type { ActOutput, CycleContext, DecideOutput } from '../types.js';
@@ -38,6 +44,43 @@ export async function act(ctx: CycleContext, prev: DecideOutput): Promise<ActOut
       actResult: 'failed',
       actFailedReason: `Persistence violation: "${prev.chosenAction}" with identical inputs was already attempted in the last ${PERSISTENCE_WINDOW} cycles. Choose a different action.`,
     };
+  }
+
+  // Item 15 — no-progress law. If the work has stalled (no open-job item
+  // or gate has moved for >= N cycles) and the lattice keeps choosing the
+  // dominant (stalled) action, refuse it to force a posture change. At 2N,
+  // also escalate. Persistence cannot see this — the stalled action's
+  // inputs vary cycle to cycle; what is constant is the lack of movement.
+  const noProgress = readNoProgressCycles(db);
+  if (prev.chosenAction && noProgress >= NO_PROGRESS_THRESHOLD) {
+    const dominant = dominantRecentAction(db);
+    if (dominant && prev.chosenAction === dominant) {
+      if (noProgress >= NO_PROGRESS_ESCALATE) {
+        ctx.trace.write({
+          kind: 'substrate',
+          cycle: ctx.cycle,
+          at_ms: ctx.at_ms,
+          phase: 'act',
+          outcome: 'escalate',
+          law: 'no-progress',
+          reason: `${noProgress} cycles without item/gate progress; escalating to operator`,
+        });
+      }
+      ctx.trace.write({
+        kind: 'substrate',
+        cycle: ctx.cycle,
+        at_ms: ctx.at_ms,
+        phase: 'act',
+        outcome: 'block',
+        law: 'no-progress',
+        reason: `${noProgress} cycles without any item closing or gate clearing; "${prev.chosenAction}" is the stalled approach`,
+      });
+      return {
+        ...prev,
+        actResult: 'failed',
+        actFailedReason: `No-progress intervention: ${noProgress} cycles without any item closing or gate clearing. "${prev.chosenAction}" is the stalled approach — do NOT repeat it. Change posture: delegate the work differently, re-brief the open item with a sharper gate, verify what already exists, or escalate.`,
+      };
+    }
   }
 
   const actCtx: ActContext = {

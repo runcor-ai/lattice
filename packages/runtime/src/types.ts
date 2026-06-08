@@ -81,8 +81,19 @@ export interface MemoryRecallView {
 export interface TasksView {
   /** Open jobs in opened-at order. `body` is the Item 10 Layer-3 content. */
   listOpenJobs(): readonly { id: string; title: string; why: string; body: string }[];
-  /** Open items for a given job (status === 'open'). */
-  listOpenItems(jobId: string): readonly { id: string; description: string; iteration_count: number }[];
+  /**
+   * Open items for a given job (status === 'open'). `gate` is the item's
+   * live deterministic-gate verdict, evaluated against the filesystem this
+   * cycle, so the reality slice can contradict a drifted situation summary
+   * with ground truth (an item whose gate already passes, or the exact
+   * condition still missing).
+   */
+  listOpenItems(jobId: string): readonly {
+    id: string;
+    description: string;
+    iteration_count: number;
+    gate: { passed: boolean; reason: string; deferred: boolean };
+  }[];
 }
 
 /** Context shared by every phase of one cycle. Built fresh per cycle. */

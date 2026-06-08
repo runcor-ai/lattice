@@ -100,6 +100,16 @@ export const InstantiateSchema = z.object({
   identity_seed: z.string().min(1),
   /** Item 11 — ordered persona bundle names composed (with identity_seed appended) into Layer 1. */
   persona_bundles: z.array(z.string().min(1)).optional(),
+  /**
+   * Item 16 — director posture. When true, the lattice gets the
+   * director tool surface (delegate, read, verify/close items, append
+   * items, noop) and NO file-write/execute tools: fs-write and
+   * shell-exec are stripped from the manifest and the auto workspace
+   * write-root is not provisioned. The lattice directs and verifies; the
+   * executor writes. Makes byte-level authoring (and its loops)
+   * structurally impossible — there is no tool to do it with.
+   */
+  director: z.boolean().optional(),
   /** Item 10 — Layer 2 (init) seed content, promoted to memory once at startup. */
   init_seed: z.string().optional(),
   goals: z.array(z.string().min(1)).default([]),
@@ -181,13 +191,31 @@ export type TraceEntryShape = z.infer<typeof TraceEntrySchema>;
 
 export const TraceQuerySchema = z.object({
   after_cycle: z.coerce.number().int().optional(),
+  // Upper cycle bound for windowed reads (the visualizer scrubs by fetching
+  // a window [target - W, target + W]); returns rows with cycle < before_cycle.
+  before_cycle: z.coerce.number().int().optional(),
   limit: z.coerce.number().int().min(1).max(1000).default(200),
-  kind: z.enum(['phase', 'subconscious', 'job', 'substrate', 'operator']).optional(),
+  kind: z.enum(['phase', 'subconscious', 'job', 'substrate', 'operator', 'cognition']).optional(),
   phase: z
     .enum(['observe', 'ground', 'recall', 'decide', 'act', 'judge', 'write', 'pulse'])
     .optional(),
 });
 export type TraceQuery = z.infer<typeof TraceQuerySchema>;
+
+/**
+ * A trace row as returned by GET /trace and emitted over SSE: the flat
+ * stored entry (the trace store writes JSON.stringify(entry), so kind/cycle/
+ * at_ms/phase live inside it) plus the DB row `id` attached by the read API
+ * for stable hover + ordering across windowed fetches.
+ */
+export type TraceRow = {
+  id: number;
+  cycle: number;
+  at_ms: number;
+  kind: 'phase' | 'substrate' | 'subconscious' | 'job' | 'operator';
+  phase?: string;
+  [k: string]: unknown;
+};
 
 /* -------------------- Jobs / escalations -------------------- */
 

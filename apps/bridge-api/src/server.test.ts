@@ -181,6 +181,40 @@ describe('GET /api/lattices/:id/trace', () => {
     await supervisor.closeAll();
     await app.close();
   });
+
+  it('attaches the row id and windows by before_cycle (visualizer read)', async () => {
+    const { app, supervisor } = await makeApp();
+    const create = await app.inject({ method: 'POST', url: '/api/lattices', payload: VALID_INSTANTIATE });
+    const created = create.json() as InstantiateResponse;
+
+    // Let the lattice tick enough to span several cycles.
+    await new Promise((r) => setTimeout(r, 150));
+
+    const all = await app.inject({
+      method: 'GET',
+      url: `/api/lattices/${created.lattice_id}/trace?limit=500`,
+    });
+    const rows = all.json() as Array<{ id: number; cycle: number; kind: string }>;
+    expect(rows.length).toBeGreaterThan(0);
+    // Every row carries a stable numeric id (attached by the read API) and
+    // the flat envelope fields (cycle/kind live inside body).
+    expect(rows.every((r) => typeof r.id === 'number' && typeof r.cycle === 'number')).toBe(true);
+    // ids are strictly increasing (ORDER BY id ASC) — stable ordering for the timeline.
+    for (let i = 1; i < rows.length; i++) expect(rows[i].id).toBeGreaterThan(rows[i - 1].id);
+
+    const maxCycle = Math.max(...rows.map((r) => r.cycle));
+    if (maxCycle >= 1) {
+      const windowed = await app.inject({
+        method: 'GET',
+        url: `/api/lattices/${created.lattice_id}/trace?before_cycle=${maxCycle}&limit=500`,
+      });
+      const wrows = windowed.json() as Array<{ cycle: number }>;
+      expect(wrows.every((r) => r.cycle < maxCycle)).toBe(true);
+    }
+
+    await supervisor.closeAll();
+    await app.close();
+  });
 });
 
 /* -------------------- Dials -------------------- */
@@ -686,6 +720,49 @@ describe('Item 11 — persona bundle composition', () => {
     const body = (inspect.json() as InspectResponse).identity.composed_body;
     expect(body.startsWith('I am a test lattice.')).toBe(true);
     expect(body).not.toContain('I am a software engineer');
+    await supervisor.closeAll();
+    await app.close();
+  });
+});
+
+/* -------------------- Item 16 — director tool surface -------------------- */
+
+describe('Item 16 — director tool surface', () => {
+  it('a director lattice has NO write tool; a non-director gets the workspace write', async () => {
+    const { app, supervisor } = await makeApp();
+    const manifest = [
+      { kind: 'fs-write', name: 'app-write', config: { outDir: join(dir, 'wd') } },
+      { kind: 'shell-exec', name: 'sh', config: { cwd: dir } },
+      { kind: 'fs-read', name: 'src', config: { root: dir } },
+    ];
+
+    const dir1 = await app.inject({
+      method: 'POST',
+      url: '/api/lattices',
+      payload: { ...VALID_INSTANTIATE, name: 'director', director: true, tool_manifest: manifest },
+    });
+    const dId = (dir1.json() as InstantiateResponse).lattice_id;
+    const dActions = supervisor.get(dId)!.lattice.actions.map((a) => a.name);
+    // no file-write or execute tool, and no auto workspace write
+    expect(dActions).not.toContain('app-write');
+    expect(dActions).not.toContain('sh');
+    expect(dActions).not.toContain('workspace');
+    // read-only sense survives
+    expect(supervisor.get(dId)!.lattice.senses.map((s) => s.name)).toContain('src');
+    // persona reflects the posture
+    const inspectD = await app.inject({ method: 'GET', url: `/api/lattices/${dId}` });
+    expect((inspectD.json() as InspectResponse).identity.composed_body).toContain('director, not an executor');
+
+    const exec = await app.inject({
+      method: 'POST',
+      url: '/api/lattices',
+      payload: { ...VALID_INSTANTIATE, name: 'executor', tool_manifest: manifest },
+    });
+    const nId = (exec.json() as InstantiateResponse).lattice_id;
+    const nActions = supervisor.get(nId)!.lattice.actions.map((a) => a.name);
+    expect(nActions).toContain('app-write');
+    expect(nActions).toContain('workspace');
+
     await supervisor.closeAll();
     await app.close();
   });

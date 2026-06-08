@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import type { Database } from 'better-sqlite3';
 import fastifyStatic from '@fastify/static';
 import {
   AppendItemSchema,
@@ -20,6 +21,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { BundleLoader } from './bundle-loader.js';
 import { loadPersonaRegistry } from './persona-loader.js';
 import { SecretStore } from './secret-store.js';
+import { cachedSummary, summarizeJob, summarizeThought } from './summarize.js';
 import { Supervisor } from './supervisor.js';
 import { ensureWorkspaceRoot } from './workspace.js';
 
@@ -185,6 +187,10 @@ export async function buildServer(opts: BuildServerOptions): Promise<BuiltServer
       sql += ` AND cycle > ?`;
       args.push(q.after_cycle);
     }
+    if (q.before_cycle !== undefined) {
+      sql += ` AND cycle < ?`;
+      args.push(q.before_cycle);
+    }
     if (q.kind !== undefined) {
       sql += ` AND kind = ?`;
       args.push(q.kind);
@@ -203,7 +209,143 @@ export async function buildServer(opts: BuildServerOptions): Promise<BuiltServer
       phase: string | null;
       body: string;
     }>;
-    return rows.map((row) => safeJson(row.body));
+    // body is the full flat entry (kind/cycle/at_ms/phase included). Attach
+    // the DB row id so the visualizer has a stable key for hover + ordering.
+    return rows.map((row) => ({ ...safeJson(row.body), id: row.id }));
+  });
+
+  /* --------------- Memory (read-only) --------------- */
+  // Surfaces the lattice's actual mind — episodic/semantic/identity memories
+  // (each with its "why"), current plan, goals, and the running situation
+  // summary — for the visualizer's thoughts panel. Pure reads; no writes.
+  app.get('/api/lattices/:id/memory', async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const r = supervisor.get(id);
+    if (!r) return reply.code(404).send(errorBody('lattice_not_found', `no lattice ${id}`));
+    const q = req.query as { limit?: string };
+    const limit = Math.min(100, Math.max(1, Number(q.limit ?? 30) || 30));
+    const db = r.lattice.dbHandle();
+    const all = <T>(sql: string, ...args: unknown[]): T[] => {
+      try {
+        return db.prepare(sql).all(...args) as T[];
+      } catch {
+        return [];
+      }
+    };
+    const one = <T>(sql: string): T | null => {
+      try {
+        return (db.prepare(sql).get() as T) ?? null;
+      } catch {
+        return null;
+      }
+    };
+    const situation = one<{ body: string; updated_at_cycle: number }>(
+      `SELECT body, updated_at_cycle FROM situation_current WHERE id='self'`,
+    );
+    return {
+      situation: situation?.body ?? null,
+      situation_cycle: situation?.updated_at_cycle ?? null,
+      episodic: all<{ cycle: number; body: string; why: string }>(
+        `SELECT cycle, body, why FROM memory_episodic ORDER BY id DESC LIMIT ?`,
+        limit,
+      ),
+      semantic: all<{ cycle: number; body: string; why: string }>(
+        `SELECT cycle, body, why FROM memory_semantic ORDER BY id DESC LIMIT ?`,
+        limit,
+      ),
+      identity: all<{ cycle: number; body: string; why: string }>(
+        `SELECT cycle, body, why FROM memory_identity ORDER BY id DESC LIMIT ?`,
+        limit,
+      ),
+      goals: all<{ body: string; state: string; why: string }>(
+        `SELECT body, state, why FROM goal ORDER BY proposed_at_cycle DESC LIMIT ?`,
+        limit,
+      ),
+      plan: all<{ ordinal: number; description: string; state: string }>(
+        `SELECT ordinal, description, state FROM plan_item ORDER BY ordinal ASC LIMIT 100`,
+      ),
+      jobs: readJobs(db),
+    };
+  });
+
+  /* --------------- Job summary (Claude pass) --------------- */
+  app.get('/api/lattices/:id/job-summary', async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const r = supervisor.get(id);
+    if (!r) return reply.code(404).send(errorBody('lattice_not_found', `no lattice ${id}`));
+    const jobs = readJobs(r.lattice.dbHandle());
+    if (jobs.length === 0) return { summary: null };
+    const jobText = jobs
+      .map((j) => {
+        const items = j.items
+          .map((it) => `  - [${it.state}] ${it.description}`)
+          .join('\n');
+        return `JOB: ${j.title}\nstatus: ${j.status}\nwhy: ${j.why}\n${j.body}\nitems:\n${items}`;
+      })
+      .join('\n\n');
+    // Signature: re-summarize only when status or any item state changes.
+    const signature = jobs
+      .map((j) => `${j.id}:${j.status}:${j.items.map((it) => it.state).join('')}`)
+      .join('|');
+    try {
+      const summary = await summarizeJob(id, jobText, signature);
+      return { summary };
+    } catch (err) {
+      return reply
+        .code(503)
+        .send(errorBody('summarize_failed', err instanceof Error ? err.message : String(err)));
+    }
+  });
+
+  /* --------------- Cycle thought summary (Claude pass) --------------- */
+  // A one-shot Claude summarization of a cycle's raw reasoning → one/two
+  // plain sentences for the thoughts box. On-demand + cached. `?refresh=1`
+  // returns the cached value only (no model call) when absent.
+  app.get('/api/lattices/:id/cycles/:cycle/summary', async (req, reply) => {
+    const params = req.params as { id: string; cycle: string };
+    const id = params.id;
+    const cycle = Number(params.cycle);
+    const r = supervisor.get(id);
+    if (!r) return reply.code(404).send(errorBody('lattice_not_found', `no lattice ${id}`));
+    if (!Number.isFinite(cycle)) {
+      return reply.code(400).send(errorBody('invalid_query', 'cycle must be a number'));
+    }
+
+    const cached = cachedSummary(id, cycle);
+    if (cached !== undefined) return { cycle, summary: cached, cached: true };
+    // Cache-only mode: don't trigger a model call, just report miss.
+    if ((req.query as { cached_only?: string }).cached_only === '1') {
+      return { cycle, summary: null, cached: false };
+    }
+
+    const db = r.lattice.dbHandle();
+    const cog = db
+      .prepare<[number]>(
+        `SELECT body FROM trace WHERE kind='cognition' AND cycle=? ORDER BY id DESC LIMIT 1`,
+      )
+      .get(cycle) as { body: string } | undefined;
+    let reasoning = '';
+    let action: string | null = null;
+    if (cog) {
+      const b = safeJson(cog.body);
+      reasoning = typeof b.reasoning === 'string' ? b.reasoning : '';
+      action = typeof b.action === 'string' ? b.action : null;
+    } else {
+      const ep = db
+        .prepare<[number]>(`SELECT why, body FROM memory_episodic WHERE cycle=? ORDER BY id DESC LIMIT 1`)
+        .get(cycle) as { why: string; body: string } | undefined;
+      if (ep) reasoning = ep.why || ep.body;
+    }
+    if (!reasoning) return { cycle, summary: null, cached: false };
+
+    try {
+      const summary = await summarizeThought(id, cycle, reasoning, action);
+      return { cycle, summary, cached: false };
+    } catch (err) {
+      return reply
+        .code(503)
+        .send(errorBody('summarize_failed', err instanceof Error ? err.message : String(err)));
+    }
   });
 
   /* --------------- Trace SSE --------------- */
@@ -486,6 +628,7 @@ export async function buildServer(opts: BuildServerOptions): Promise<BuiltServer
   });
 
   /* --------------- Bundles --------------- */
+
   app.get('/api/bundles', async () =>
     bundles.list().map((b) => ({
       id: b.id,
@@ -570,6 +713,42 @@ function safeJson(s: string): Record<string, unknown> {
   } catch {
     return { _raw: s };
   }
+}
+
+interface JobItemView {
+  ordinal: number;
+  description: string;
+  state: string;
+}
+interface JobView {
+  id: string;
+  title: string;
+  body: string;
+  why: string;
+  status: string;
+  items: JobItemView[];
+}
+/** Read the lattice's jobs with their plan items grouped — the complete job. */
+function readJobs(db: Database): JobView[] {
+  const safe = <T>(sql: string): T[] => {
+    try {
+      return db.prepare(sql).all() as T[];
+    } catch {
+      return [];
+    }
+  };
+  const jobs = safe<{ id: string; title: string; body: string; why: string; status: string }>(
+    `SELECT id, title, body, why, status FROM plan_job ORDER BY rowid ASC`,
+  );
+  const items = safe<{ job_id: string; ordinal: number; description: string; state: string }>(
+    `SELECT job_id, ordinal, description, state FROM plan_item ORDER BY ordinal ASC`,
+  );
+  return jobs.map((j) => ({
+    ...j,
+    items: items
+      .filter((it) => it.job_id === j.id)
+      .map(({ ordinal, description, state }) => ({ ordinal, description, state })),
+  }));
 }
 
 const isMain = (() => {

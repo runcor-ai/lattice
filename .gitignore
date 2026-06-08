@@ -56,3 +56,7 @@ runcor-site-update-instructions*.md
 runcor.ai-content.json
 open-claude.bat
 
+live-run-output/
+live-run-output-*/
+coherence-run/
+coherence-results/
