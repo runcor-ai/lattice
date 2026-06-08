@@ -31,11 +31,12 @@ export const useTraceStore = defineStore('trace', {
   }),
   actions: {
     async loadInitial(latticeId: string) {
-      const initial = (await Api.trace(latticeId, { limit: this.capacity })) as Omit<
-        UiTraceEntry,
-        '_id'
-      >[];
-      this.entries = initial.slice(-this.capacity).map((e, i) => ({ ...e, _id: `init-${i}` }));
+      const initial = (await Api.trace(latticeId, { limit: this.capacity })) as Array<
+        Record<string, unknown>
+      >;
+      this.entries = initial
+        .slice(-this.capacity)
+        .map((e, i) => ({ ...e, _id: `init-${i}` }) as UiTraceEntry);
       this._seq = this.entries.length;
     },
     startStream(latticeId: string) {
@@ -44,10 +45,10 @@ export const useTraceStore = defineStore('trace', {
       es.addEventListener('trace', (e) => {
         const ev = e as MessageEvent;
         try {
-          const entry = JSON.parse(ev.data) as Omit<UiTraceEntry, '_id'>;
+          const entry = JSON.parse(ev.data) as Record<string, unknown>;
           this._seq += 1;
           const sseId = ev.lastEventId ? `sse-${ev.lastEventId}` : `live-${this._seq}`;
-          this.entries.push({ ...entry, _id: sseId });
+          this.entries.push({ ...entry, _id: sseId } as UiTraceEntry);
           if (this.entries.length > this.capacity) {
             this.entries.splice(0, this.entries.length - this.capacity);
           }

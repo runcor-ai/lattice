@@ -102,8 +102,28 @@ describe('onPlanFileReady chaining + ordering (Item 5)', () => {
     expect(steps[0]!.blocked_by).toBeNull();
     expect(steps[1]!.blocked_by).toBe(steps[0]!.id);
     expect(steps[2]!.blocked_by).toBe(steps[1]!.id);
-    // the no-gate step got a marker fallback
-    expect(steps[2]!.description).toContain('create marker');
+    // the no-gate step is gated on an explicit, justified close — not a
+    // ceremonial marker file (the old marker-chase deadlock).
+    expect(steps[2]!.description).toContain('close-job-item');
+    expect(steps[2]!.description).not.toContain('create marker');
+    expect(JSON.parse(steps[2]!.completion_check).hooks[0].name).toBe('step_acknowledged');
+  });
+
+  it('a no-gate prose step is deferred in the auto sweep but passes on an explicit close', async () => {
+    const gate = addPlanGate();
+    writePlan('- [ ] just do the thing'); // single prose step, no inline gate
+    await jobs.attemptCheck(gate.id, { cycle: 2 });
+    const [s1] = jobs.checklist.items(jobId).filter((i) => i.source === 'plan_step');
+
+    // subconscious sweep must NOT silently auto-pass it (costly-tiered)
+    const swept = await jobs.attemptCheck(s1!.id, { cycle: 3, mode: 'auto' });
+    expect(swept.outcome).toBe('failed_iterating');
+    expect(jobs.checklist.getItem(s1!.id)!.state).toBe('open');
+    expect(jobs.checklist.getItem(s1!.id)!.iteration_count).toBe(0); // auto mode burns no budget
+
+    // an explicit close (lattice mode — close-job-item) acknowledges it
+    const closed = await jobs.attemptCheck(s1!.id, { cycle: 4, mode: 'lattice' });
+    expect(closed.outcome).toBe('passed');
   });
 
   it('enforces order — a later step is blocked until the earlier one passes', async () => {

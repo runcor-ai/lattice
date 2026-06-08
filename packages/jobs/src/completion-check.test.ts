@@ -5,7 +5,7 @@ import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { builtinRegistry, runDeterministicHooks } from './completion-check.js';
+import { builtinRegistry, runDeterministicHooks, summarizeGate } from './completion-check.js';
 import type { CompletionCheckSpec, Item } from './types.js';
 
 /**
@@ -137,5 +137,59 @@ describe('builtin registry exposes the Item 7 vocabulary', () => {
     expect(registry.get('command_exits_zero')?.costly).toBe(true);
     expect(registry.get('http_status_is')?.costly).toBe(true);
     expect(registry.get('file_exists')?.costly).toBe(false);
+  });
+});
+
+describe('summarizeGate — live verdict for the reality slice', () => {
+  const gate = (spec: CompletionCheckSpec, item = fakeItem()) =>
+    summarizeGate(spec, registry, item, 1);
+
+  it('reports the exact missing-file reason when a cheap gate fails', () => {
+    const missing = join(dir, 'step-7.done');
+    const out = gate({ hooks: [{ name: 'file_exists', args: { path: missing } }] });
+    expect(out.passed).toBe(false);
+    expect(out.deferred).toBe(false);
+    expect(out.reason).toContain('not found');
+    expect(out.reason).toContain('step-7.done');
+  });
+
+  it('reports satisfied when a cheap gate already passes (the drift-breaker)', () => {
+    const p = join(dir, 'step-7.done');
+    writeFileSync(p, 'done');
+    const out = gate({ hooks: [{ name: 'file_exists', args: { path: p } }] });
+    expect(out.passed).toBe(true);
+    expect(out.reason).toContain('close this item');
+  });
+
+  it('does NOT execute costly hooks — reports them as verified on explicit close', () => {
+    const out = gate({ hooks: [{ name: 'command_exits_zero', args: { command: 'node --version', cwd: dir } }] });
+    expect(out.passed).toBe(false);
+    expect(out.deferred).toBe(true);
+    expect(out.reason).toContain('explicit close');
+  });
+
+  it('passes cheap gates while noting an unrun costly gate', () => {
+    const p = join(dir, 'out.txt');
+    writeFileSync(p, 'hi');
+    const out = gate({
+      hooks: [
+        { name: 'file_exists', args: { path: p } },
+        { name: 'command_exits_zero', args: { command: 'node --version', cwd: dir } },
+      ],
+    });
+    expect(out.passed).toBe(true);
+    expect(out.deferred).toBe(true);
+  });
+
+  it('fails closed on an unknown hook name', () => {
+    const out = gate({ hooks: [{ name: 'no_such_hook', args: {} }] });
+    expect(out.passed).toBe(false);
+    expect(out.reason).toContain('unknown gate hook');
+  });
+
+  it('treats a spec with no hooks as no-gate (passable)', () => {
+    const out = gate({ hooks: [] });
+    expect(out.passed).toBe(true);
+    expect(out.reason).toContain('no deterministic gate');
   });
 });

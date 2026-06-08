@@ -24,7 +24,7 @@ export class SqliteTraceIndex {
 
   write(entry: TraceEntry): void {
     const phase =
-      entry.kind === 'phase' || entry.kind === 'substrate'
+      entry.kind === 'phase' || entry.kind === 'substrate' || entry.kind === 'cognition'
         ? (entry as { phase: string }).phase
         : null;
     this.insert.run(entry.cycle, entry.at_ms, entry.kind, phase, JSON.stringify(entry));

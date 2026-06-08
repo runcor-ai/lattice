@@ -19,6 +19,9 @@ onBeforeUnmount(() => {
 function open(id: string) {
   router.push(`/lattice/${id}`);
 }
+function visualize(id: string) {
+  router.push(`/lattice/${id}/visualize`);
+}
 function instantiate() {
   router.push('/instantiate');
 }
@@ -50,6 +53,7 @@ function instantiate() {
             <th>Backend</th>
             <th>Autonomy</th>
             <th>ID</th>
+            <th></th>
           </tr>
         </thead>
         <tbody>
@@ -64,6 +68,9 @@ function instantiate() {
             </td>
             <td><span class="chip">{{ row.autonomy }}</span></td>
             <td class="mono faint">{{ row.lattice_id }}</td>
+            <td class="row-viz">
+              <button class="viz-btn" @click.stop="visualize(row.lattice_id)">Visualize ▸</button>
+            </td>
           </tr>
         </tbody>
       </table>
@@ -110,6 +117,18 @@ table.data tbody tr {
 }
 .row-name {
   font-weight: 500;
+}
+.row-viz {
+  text-align: right;
+}
+.viz-btn {
+  padding: 2px 10px;
+  font-size: var(--t-xs);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.viz-btn:hover {
+  background: var(--bg-3);
 }
 .empty {
   text-align: center;

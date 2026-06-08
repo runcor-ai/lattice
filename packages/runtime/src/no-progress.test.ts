@@ -1,0 +1,140 @@
+import { default as DatabaseCtor } from 'better-sqlite3';
+import { describe, it, expect } from 'vitest';
+
+import type { Db } from './db.js';
+import {
+  NO_PROGRESS_ESCALATE,
+  NO_PROGRESS_THRESHOLD,
+  dominantRecentAction,
+  openJobItemSignature,
+  recordProgress,
+} from './no-progress.js';
+import { act } from './phases/act.js';
+import type { CycleContext, DecideOutput } from './types.js';
+
+const Database = DatabaseCtor;
+
+function progressDb(): Db {
+  const db = new Database(':memory:') as unknown as Db;
+  db.exec(`
+    CREATE TABLE plan_job (id TEXT PRIMARY KEY, status TEXT NOT NULL);
+    CREATE TABLE plan_item (id TEXT PRIMARY KEY, job_id TEXT NOT NULL, state TEXT NOT NULL);
+    CREATE TABLE progress_state (id TEXT PRIMARY KEY, no_progress_cycles INTEGER NOT NULL DEFAULT 0, last_signature TEXT NOT NULL DEFAULT '');
+    CREATE TABLE recent_action (cycle INTEGER NOT NULL, action_name TEXT NOT NULL, input_hash TEXT NOT NULL);
+  `);
+  return db;
+}
+
+describe('no-progress signature + counter (Item 15)', () => {
+  it('signature is empty with no open jobs, non-empty with open items', () => {
+    const db = progressDb();
+    expect(openJobItemSignature(db)).toBe('');
+    db.prepare("INSERT INTO plan_job VALUES ('j','open')").run();
+    db.prepare("INSERT INTO plan_item VALUES ('i1','j','open')").run();
+    expect(openJobItemSignature(db)).not.toBe('');
+  });
+
+  it('counter climbs while item state is unchanged, resets when an item moves', () => {
+    const db = progressDb();
+    db.prepare("INSERT INTO plan_job VALUES ('j','open')").run();
+    db.prepare("INSERT INTO plan_item VALUES ('i1','j','open')").run();
+    expect(recordProgress(db)).toBe(0);
+    expect(recordProgress(db)).toBe(1);
+    expect(recordProgress(db)).toBe(2);
+    db.prepare("UPDATE plan_item SET state='passed' WHERE id='i1'").run();
+    expect(recordProgress(db)).toBe(0); // an item moved → progress
+    expect(recordProgress(db)).toBe(1);
+  });
+
+  it('re-writing the plan (no item moves) does NOT count as progress', () => {
+    const db = progressDb();
+    db.prepare("INSERT INTO plan_job VALUES ('j','open')").run();
+    db.prepare("INSERT INTO plan_item VALUES ('i1','j','open')").run();
+    recordProgress(db); // 0
+    expect(recordProgress(db)).toBe(1);
+    expect(recordProgress(db)).toBe(2);
+    expect(recordProgress(db)).toBe(3); // keeps climbing toward the threshold
+  });
+
+  it('no open jobs resets the counter', () => {
+    const db = progressDb();
+    db.prepare("INSERT INTO plan_job VALUES ('j','open')").run();
+    db.prepare("INSERT INTO plan_item VALUES ('i1','j','open')").run();
+    recordProgress(db); recordProgress(db);
+    db.prepare("UPDATE plan_job SET status='closed_full' WHERE id='j'").run();
+    expect(recordProgress(db)).toBe(0);
+  });
+
+  it('dominantRecentAction returns the most frequent', () => {
+    const db = progressDb();
+    for (let i = 0; i < 5; i++) db.prepare('INSERT INTO recent_action VALUES (?,?,?)').run(i, 'workspace', 'h' + i);
+    db.prepare("INSERT INTO recent_action VALUES (9,'read','h9')").run();
+    expect(dominantRecentAction(db)).toBe('workspace');
+  });
+});
+
+/* ---- act-phase enforcement ---- */
+
+const probe = {
+  name: 'probe',
+  description: 'p',
+  role: { sense: false, action: true },
+  readOnly: true,
+  destructive: false,
+  concurrencySafe: true,
+  isEnabled: () => true,
+  canInvoke: () => ({ allow: true }),
+  invoke: async () => ({ ok: true }),
+};
+const other = { ...probe, name: 'other' };
+
+function makeCtx(db: Db, traces: Array<Record<string, unknown>>): CycleContext {
+  return {
+    cycle: 1,
+    at_ms: 1,
+    abortSignal: new AbortController().signal,
+    autonomy: 'medium',
+    actions: [probe, other],
+    memory: { dbHandle: () => db },
+    trace: { write: (e: Record<string, unknown>) => traces.push(e) },
+  } as unknown as CycleContext;
+}
+function prevWith(action: string): DecideOutput {
+  return { chosenAction: action, chosenInput: {} } as unknown as DecideOutput;
+}
+function stalledDb(cycles: number): Db {
+  const db = progressDb();
+  db.prepare("INSERT INTO progress_state VALUES ('self',?,'sig')").run(cycles);
+  for (let i = 0; i < 5; i++) db.prepare('INSERT INTO recent_action VALUES (?,?,?)').run(i, 'probe', 'h' + i);
+  return db;
+}
+
+describe('act phase enforces no-progress (Item 15)', () => {
+  it('blocks the dominant action once stalled >= threshold', async () => {
+    const db = stalledDb(NO_PROGRESS_THRESHOLD);
+    const traces: Array<Record<string, unknown>> = [];
+    const r = await act(makeCtx(db, traces), prevWith('probe'));
+    expect(r.actResult).toBe('failed');
+    expect(r.actFailedReason).toMatch(/No-progress/);
+    expect(traces.some((t) => t.kind === 'substrate' && t.law === 'no-progress' && t.outcome === 'block')).toBe(true);
+  });
+
+  it('does NOT block a different (non-dominant) action — lets the lattice escape', async () => {
+    const db = stalledDb(NO_PROGRESS_THRESHOLD);
+    const r = await act(makeCtx(db, []), prevWith('other'));
+    expect(r.actResult).toBe('ok');
+  });
+
+  it('does not block below threshold', async () => {
+    const db = stalledDb(NO_PROGRESS_THRESHOLD - 1);
+    const r = await act(makeCtx(db, []), prevWith('probe'));
+    expect(r.actResult).toBe('ok');
+  });
+
+  it('also escalates at 2N', async () => {
+    const db = stalledDb(NO_PROGRESS_ESCALATE);
+    const traces: Array<Record<string, unknown>> = [];
+    await act(makeCtx(db, traces), prevWith('probe'));
+    expect(traces.some((t) => t.law === 'no-progress' && t.outcome === 'escalate')).toBe(true);
+  });
+});

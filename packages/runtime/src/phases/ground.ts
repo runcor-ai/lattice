@@ -1,6 +1,8 @@
 import type { Capability } from '@runcor/capabilities';
 import { wrap } from '@runcor/substrate';
 
+import { NO_PROGRESS_THRESHOLD, readNoProgressCycles } from '../no-progress.js';
+import type { RuntimeMemoryAdapter } from '../sqlite-memory.js';
 import type {
   CycleContext,
   GroundOutput,
@@ -57,11 +59,20 @@ export async function ground(
     ? `situation (your running summary — trust this over re-deriving state from scratch):\n${situation}`
     : renderRecentActions(ctx.recall);
 
+  // Item 15 — when the work has stalled, lead the reality slice with a
+  // high-salience posture-change demand so the decide call cannot miss it.
+  const noProgress = readNoProgressCycles((ctx.memory as RuntimeMemoryAdapter).dbHandle());
+  const noProgressBlock =
+    noProgress >= NO_PROGRESS_THRESHOLD
+      ? `NO PROGRESS — ${noProgress} cycles have passed with no plan item closing and no gate clearing. The current approach is NOT working. Change posture NOW: delegate the work differently, re-brief the open item with a sharper gate, verify what already exists on disk, or escalate. Do not repeat what you have been doing.`
+      : '';
+
   const groundedPrompt = wrap({
     cycle: ctx.cycle,
     at_ms: ctx.at_ms,
     identityComposed: ctx.identity.composed_body,
     realitySliceSummary: [
+      noProgressBlock,
       `senses:\n${senseSummary || '(none enabled)'}`,
       contextBlock,
       jobBodyBlock,
@@ -205,7 +216,9 @@ function renderTasksBlock(tasks: TasksView | undefined): string {
   if (!tasks) return '';
   const jobs = tasks.listOpenJobs();
   if (jobs.length === 0) return 'open tasks: (none)';
-  const lines: string[] = ['open tasks:'];
+  const lines: string[] = [
+    'open tasks (the gate line under each item is checked live against the filesystem THIS cycle — trust it over your running summary):',
+  ];
   for (const job of jobs) {
     lines.push(`- job "${job.title}" — ${job.why}`);
     const items = tasks.listOpenItems(job.id);
@@ -217,6 +230,18 @@ function renderTasksBlock(tasks: TasksView | undefined): string {
         // Item id is shown so the lattice can copy it verbatim into
         // close-job-item's TOKENS block once the deliverable exists.
         lines.push(`    [ ] id=${it.id} — ${it.description}${iter}`);
+        // Ground-truth gate verdict, evaluated against disk this cycle. A
+        // passing gate on an item the summary calls "blocked" — or the exact
+        // missing condition on one the summary calls "done" — is the signal
+        // that breaks a poisoned-summary drift loop.
+        const g = it.gate;
+        if (g) {
+          lines.push(
+            g.passed
+              ? `         gate OK — ${g.reason}`
+              : `         gate NOT MET — ${g.reason}`,
+          );
+        }
       }
     }
   }

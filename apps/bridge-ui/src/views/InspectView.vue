@@ -110,6 +110,7 @@ function summarize(entry: UiTraceEntry): string {
         </div>
       </div>
       <div class="inspect-actions">
+        <RouterLink :to="`/lattice/${id}/visualize`" class="viz-link">Visualize ▸</RouterLink>
         <button v-if="lattices.selected.status === 'running'" @click="pause">Pause</button>
         <button v-else-if="lattices.selected.status === 'paused'" class="primary" @click="resume">
           Resume
@@ -258,6 +259,17 @@ function summarize(entry: UiTraceEntry): string {
 .inspect-actions {
   display: flex;
   gap: var(--s-2);
+  align-items: center;
+}
+.viz-link {
+  border: var(--bw) solid var(--accent);
+  color: var(--accent);
+  border-radius: var(--r-2);
+  padding: var(--s-2) var(--s-3);
+  font-size: var(--t-sm);
+}
+.viz-link:hover {
+  background: var(--bg-3);
 }
 .grid {
   display: grid;

@@ -6,7 +6,9 @@ export {
   parseSpec,
   serializeSpec,
   runDeterministicHooks,
+  summarizeGate,
   defaultIterationCap,
+  type GateSummary,
   type HookFn,
   type HookContext,
 } from './completion-check.js';
