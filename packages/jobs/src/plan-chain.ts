@@ -71,8 +71,6 @@ function parseGateSpec(spec: string): { name: string; args: Record<string, unkno
 function buildStepGate(
   step: PlanStep,
   workspaceRoot: string,
-  jobId: string,
-  index: number,
 ): { spec: CompletionCheckSpec; descSuffix: string } {
   if (step.gate) {
     if (step.gate.name === 'manual_review') {
@@ -94,13 +92,19 @@ function buildStepGate(
     }
     return { spec: { hooks: [{ name: step.gate.name, args }] }, descSuffix: '' };
   }
-  // Fallback: a per-step marker file the lattice creates when the step is
-  // done. (The spec's stated default is fail-loud; the marker keeps the
-  // chain usable when the lattice writes a plain plan — see grounding doc.)
-  const markerRel = `.ai/notes/plans/${jobId}.step-${index + 1}.done`;
+  // Fallback: a prose step with no machine-checkable definition-of-done
+  // (e.g. "spot-check a total", "close item X"). Gate it on an explicit,
+  // justified close-job-item — NOT a ceremonial marker file. Ordering is
+  // already enforced by blocked_by, and the job's real deliverable items
+  // keep their own machine gates, so a content-free `.step-N.done` marker
+  // added no verification: it only created the marker-chase deadlock when a
+  // lattice produced the deliverable but declined the ritual. See the
+  // `step_acknowledged` registration in completion-check.ts.
   return {
-    spec: { hooks: [{ name: 'file_exists', args: { path: join(workspaceRoot, markerRel) } }] },
-    descSuffix: ` (when done, create marker ${markerRel})`,
+    spec: { hooks: [{ name: 'step_acknowledged', args: {} }] },
+    descSuffix:
+      ` (no deliverable file to gate on — when this step's work is done, close it` +
+      ` with close-job-item and a one-line justification; no marker file needed)`,
   };
 }
 
@@ -142,7 +146,7 @@ export function onPlanFileReady(checklist: Checklist, planGateItem: Item): { app
   let prevId: string | null = null;
   let appended = 0;
   for (let i = 0; i < steps.length; i += 1) {
-    const { spec, descSuffix } = buildStepGate(steps[i]!, workspaceRoot, jobId, i);
+    const { spec, descSuffix } = buildStepGate(steps[i]!, workspaceRoot);
     const item = checklist.addItem(jobId, {
       description: `${steps[i]!.description}${descSuffix}`,
       completion_check: serializeSpec(spec),

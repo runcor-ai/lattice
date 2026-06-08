@@ -192,7 +192,7 @@ export const MIGRATIONS: readonly Migration[] = [
         id     INTEGER PRIMARY KEY AUTOINCREMENT,
         cycle  INTEGER NOT NULL,
         at_ms  INTEGER NOT NULL,
-        kind   TEXT NOT NULL CHECK (kind IN ('phase','subconscious','job','substrate','operator')),
+        kind   TEXT NOT NULL CHECK (kind IN ('phase','subconscious','job','substrate','operator','cognition')),
         phase  TEXT CHECK (phase IS NULL OR phase IN ${CYCLE_PHASE_VALUES}),
         body   TEXT NOT NULL
       );
@@ -335,6 +335,49 @@ export const MIGRATIONS: readonly Migration[] = [
     description: 'plan_job.body — the job-body content surfaced as the per-cycle Layer-3 block. Item 10.',
     sql: `
       ALTER TABLE plan_job ADD COLUMN body TEXT NOT NULL DEFAULT '';
+    `,
+  },
+  {
+    version: 20,
+    description: 'progress_state — no-progress substrate law: stalled-work detection by item/gate movement. Item 15.',
+    sql: `
+      CREATE TABLE progress_state (
+        id                 TEXT PRIMARY KEY CHECK (id = 'self'),
+        no_progress_cycles INTEGER NOT NULL DEFAULT 0,
+        last_signature     TEXT NOT NULL DEFAULT ''
+      );
+    `,
+  },
+  {
+    version: 21,
+    description:
+      "trace.kind += 'cognition' — per-cycle grounded prompt + raw model reasoning for the operator thoughts box. Rebuilds trace to widen the CHECK (SQLite can't alter a CHECK in place). Preserves all rows + ids.",
+    sql: `
+      ALTER TABLE trace RENAME TO trace_old;
+      CREATE TABLE trace (
+        id     INTEGER PRIMARY KEY AUTOINCREMENT,
+        cycle  INTEGER NOT NULL,
+        at_ms  INTEGER NOT NULL,
+        kind   TEXT NOT NULL CHECK (kind IN ('phase','subconscious','job','substrate','operator','cognition')),
+        phase  TEXT CHECK (phase IS NULL OR phase IN ${CYCLE_PHASE_VALUES}),
+        body   TEXT NOT NULL
+      );
+      INSERT INTO trace (id, cycle, at_ms, kind, phase, body)
+        SELECT id, cycle, at_ms, kind, phase, body FROM trace_old;
+      DROP TABLE trace_old;
+    `,
+  },
+  {
+    version: 22,
+    description:
+      'heal marker-chase deadlock: open plan_step items gated only by a ceremonial .step-N.done file_exists marker are re-gated to step_acknowledged (closeable by an explicit, justified close-job-item). Item 5 follow-up — see plan-chain.ts / completion-check.ts.',
+    sql: `
+      UPDATE plan_item
+         SET completion_check = '{"hooks":[{"name":"step_acknowledged","args":{}}]}'
+       WHERE state = 'open'
+         AND source = 'plan_step'
+         AND completion_check LIKE '%"file_exists"%'
+         AND completion_check LIKE '%.step-%.done%';
     `,
   },
 ];

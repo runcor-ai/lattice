@@ -2,7 +2,7 @@ import { makeAppendPlanItemAction, makeCloseJobItemAction, type Capability } fro
 import { selectDecider, type Decider } from '@runcor/decider';
 import { DialecticDecider } from '@runcor/dialectic';
 import type { ModelBackend } from '@runcor/engine';
-import { JobsService } from '@runcor/jobs';
+import { JobsService, builtinRegistry, parseSpec, summarizeGate } from '@runcor/jobs';
 import type { AutonomyLevel } from '@runcor/substrate';
 import { SqliteTraceIndex, Trace, type TraceOptions } from '@runcor/trace';
 
@@ -183,6 +183,8 @@ export class Lattice {
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const jobs = new JobsService(this.db);
+      // Built once per cycle; reused for every open item's live gate verdict.
+      const checkRegistry = builtinRegistry();
       const tasks: TasksView = {
         listOpenJobs: () =>
           jobs.checklist
@@ -192,11 +194,27 @@ export class Lattice {
           jobs.checklist
             .items(jobId)
             .filter((it) => it.state === 'open')
-            .map((it) => ({
-              id: it.id,
-              description: it.description,
-              iteration_count: it.iteration_count,
-            })),
+            .map((it) => {
+              // Evaluate the item's cheap deterministic gate live against the
+              // filesystem so the reality slice carries ground truth that a
+              // drifted situation summary cannot override.
+              let gate: { passed: boolean; reason: string; deferred: boolean };
+              try {
+                gate = summarizeGate(parseSpec(it.completion_check), checkRegistry, it, cycle);
+              } catch (err) {
+                gate = {
+                  passed: false,
+                  reason: `gate spec unreadable: ${err instanceof Error ? err.message : String(err)}`,
+                  deferred: false,
+                };
+              }
+              return {
+                id: it.id,
+                description: it.description,
+                iteration_count: it.iteration_count,
+                gate,
+              };
+            }),
       };
       // close-job-item is a built-in, but only when the lattice has at
       // least one open job — otherwise the action would be unusable

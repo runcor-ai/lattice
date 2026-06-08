@@ -1,0 +1,105 @@
+import { readFileSync, writeFileSync } from 'node:fs';
+
+const d = JSON.parse(readFileSync('C:/runcor-lattice/scripts/run-data.json', 'utf8'));
+const L = [];
+const p = (s = '') => L.push(s);
+
+p('# Live model run — autonomous app build (2026-06-06)');
+p('');
+p('> A **software-engineer** lattice on the **real `claude` backend** (`claude-code-host`), at **full autonomy**, was handed a job to build a single-file Markdown-preview web app. This is the complete per-cycle record, generated from the lattice trace.');
+p('');
+p('## Outcome at a glance');
+p('');
+p('| | |');
+p('|---|---|');
+p('| Lattice | ' + d.ent.name + ' (`lat-q00qkoc8`) |');
+p('| Backend | `claude-code-host` (real `claude --print`), `autonomy=high`, `dialecticDepth=0`, `memoryClocks=on` |');
+p('| Cycles run | **' + d.ent.cycle + '** — stopped by the watcher safety cap (never reached idle-pause) |');
+p('| Job status | **' + d.job.status + '** — never closed |');
+p('| Deliverables | `index.html` + `README.md` **produced** (~cycle 12 / 14) but written with literal `\\n` / `\\"` escapes → **not functional** |');
+p('| Root cause | one bug: R++ string tokens never unescaped (`coerceTokenValue`, `decide.ts`) — broke the app file **and** the plan gate |');
+p('');
+p('## Setup');
+p('');
+p('- **Persona (Item 11):** `persona_bundles: ["software-engineer"]` composed with an inline seed.');
+p('- **Tools:** jailed `fs-write` (`app-write` → `live-run-output/`) + `claude-delegate` (`--dangerously-skip-permissions`, same dir). The supervisor auto-added a `workspace` write-root (Item 4), listing senses, `noop`, `close-job-item`, and `append-plan-item`.');
+p('- **Job:** *"Build a single-file Markdown preview web app"* — two items gated by `file_exists` (`index.html` ≥ 800 B, `README.md` ≥ 100 B). **Item 4 auto-inserted a gated checklist-plan item first.**');
+p('');
+p('## What it chose (action histogram across ' + d.ent.cycle + ' cycles)');
+p('');
+p('| Action | Times chosen |');
+p('|---|---:|');
+for (const [a, n] of Object.entries(d.actHist).sort((x, y) => y[1] - x[1])) p('| `' + a + '` | ' + n + ' |');
+p('');
+p('**The tell:** `workspace` was chosen **' + (d.actHist.workspace || 0) + '** of ' + d.ent.cycle + ' cycles — the lattice got into a near-loop of workspace writes that never advanced the job. `app-write` (×' + (d.actHist['app-write'] || 0) + ') produced the two deliverables.');
+p('');
+p('**Persistence substrate-law blocks (Item 6): ' + d.persistTotal + '.** Notable: the dedup law did **not** fire despite the repetition — each `workspace` write had slightly *different* inputs, so they were not exact duplicates. The "same action, same inputs" guard catches `ls`-six-times; it does **not** catch "vary the input slightly while making no progress." An honest limitation surfaced by this run.');
+p('');
+p('## Substrate findings (judge phase)');
+p('');
+p('| Law / outcome | Count |');
+p('|---|---:|');
+for (const [k, n] of Object.entries(d.lawHist).sort((x, y) => y[1] - x[1])) p('| ' + k + ' | ' + n + ' |');
+p('');
+p('## Per-cycle log');
+p('');
+p('| Cycle | Decide action | Act | Decide ms | Notes |');
+p('|---:|---|---|---:|---|');
+for (let c = 1; c <= d.ent.cycle; c++) {
+  const e = d.per[c];
+  if (!e) continue;
+  const notes = [];
+  if (e.persist) notes.push('persistence-block ×' + e.persist);
+  if (e.laws && e.laws.length) notes.push(e.laws.join(', '));
+  if (c === 4) notes.push('**plan file written** (broken — literal `\\n`)');
+  if (c === 12) notes.push('**index.html appeared**');
+  if (c === 14) notes.push('**README.md appeared**');
+  p('| ' + c + ' | `' + (e.action || '-') + '` | ' + (e.actResult || '-') + ' | ' + e.decMs + ' | ' + notes.join('; ') + ' |');
+}
+p('');
+p('## Final item states');
+p('');
+p('| Ord | Source | State | Iter | Description |');
+p('|---:|---|---|---:|---|');
+for (const i of d.items) {
+  p('| ' + i.ordinal + ' | ' + i.source + ' | ' + (i.state === 'passed' ? '✅ passed' : '⬜ ' + i.state) + ' | ' + i.ic + ' | ' + i.d + ' |');
+}
+p('');
+p('> The two deliverable items **passed** (`file_exists` checks size only, not content). The **system plan-gate (ord 0) stayed `open`** — its `content_contains` checkbox check could never match because the plan file had no real newlines. A job cannot close while any item is open → it ran to the cap.');
+p('');
+p('## Root-cause analysis');
+p('');
+p('The lattice’s `fs-write` wrote every string body with **literal `\\n` and `\\"`** instead of real newlines/quotes. Evidence: both `index.html` and the plan file contain **zero real newlines** (`wc -l` = 0). This single bug caused both failures:');
+p('');
+p('1. **The app file is non-functional** — its `<script>` / `<style>` contain literal `\\"` and `\\n`, so a browser will not execute it. The *design* is correct (a real `mdToHtml` with headings / bold / italic / code / links, HTML-escaping, a live `input` listener); the *serialization* is broken.');
+p('2. **The job never closed** — the plan gate needs a checkbox line via `content_contains` (`^\\s*- \\[[ xX]\\]`, multiline). With no real line breaks, **0 lines match** → the gate stays open → the job stays open → no idle-pause → it ran to the watcher’s cap.');
+p('');
+p('**Fix location:** `coerceTokenValue` in `packages/runtime/src/phases/decide.ts` — for R++ string tokens it strips the outer quotes but never unescapes `\\n` / `\\t` / `\\r` / `\\"` / `\\\\`. ~5 lines + a test. (A second, deeper improvement: tighten the Persistence law / add a no-progress guard so a slightly-varying write loop can’t burn 56 cycles.)');
+p('');
+p('## What worked vs. what failed');
+p('');
+p('**Worked — first real-model validation:**');
+p('- The bridge → instantiate → plan-binding job → autonomous cycle loop ran **end-to-end on a real model**, no human in the loop.');
+p('- **Item 4** forced a plan before action; **Item 11** persona composition and **Item 10** layering were live in the prompt.');
+p('- The lattice produced the **correct app design** unaided.');
+p('- **Item 9** correctly did *not* idle-pause (the job stayed open), and the **watcher cap** caught the run so it could not run away overnight.');
+p('');
+p('**Failed:**');
+p('- The R++ → `fs-write` serialization bug broke the deliverable **and** prevented completion.');
+p('- The repetitive `workspace` loop (56/60) slipped past Persistence because inputs varied.');
+p('');
+p('Both are exactly the kind of issue a live run exists to surface.');
+p('');
+if (d.situation) {
+  p('## Final fast-clock situation report (Item 1)');
+  p('');
+  p('```');
+  p(d.situation.slice(0, 1400));
+  p('```');
+  p('');
+}
+p('---');
+p('_Artifacts (gitignored): `live-run-output/index.html`, `live-run-output/README.md`, `data/lat-q00qkoc8/.ai/notes/plans/`. Generated from the lattice trace `data/lat-q00qkoc8.sqlite` via `scripts/extract-run.mjs` + `scripts/gen-report.mjs`._');
+
+writeFileSync('C:/runcor-lattice/docs/live-run-2026-06-06.md', L.join('\n') + '\n');
+console.log('WROTE docs/live-run-2026-06-06.md (' + (L.join('\n').length) + ' bytes, ' + d.ent.cycle + ' cycles)');

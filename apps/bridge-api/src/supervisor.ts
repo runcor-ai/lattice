@@ -37,10 +37,18 @@ import { ensureWorkspaceRoot } from './workspace.js';
  * plan_item). Item 10 will fold this into the Layer-1 persona properly.
  */
 const PLANNING_DISPOSITION =
-  '\n\nOn a new job, my first cycle drafts a checklist plan — a list of `- [ ]` steps — ' +
-  'to my workspace before I act on anything else. When I discover work the plan missed, ' +
-  'or need to break a step into sub-steps, I append a gated item to the job rather than ' +
-  'doing the work untracked.';
+  '\n\nOn a new job, my first cycle sets direction — a checklist plan, a list of `- [ ]` steps, ' +
+  'each with a machine-checkable gate — before any work is delegated. When I discover work the ' +
+  'plan missed, or need to break a step into sub-steps, I append a gated item to the job rather ' +
+  'than letting work happen untracked.';
+
+/** Item 16 — appended to a director lattice's Layer-1 persona. */
+const DIRECTOR_DISPOSITION =
+  '\n\nI am a director, not an executor. I hold direction over the long horizon and keep the ' +
+  'work from drifting; the executor (a coding agent, reached through delegate) does the work. I do ' +
+  'not author deliverables — I brief them, delegate them, and verify what comes back through ' +
+  'gates, and I re-brief when verification fails. A file merely existing is not evidence it is ' +
+  'correct. I have no file-write tool by design.';
 
 /**
  * Supervisor — manages the set of running lattices the Bridge owns.
@@ -155,8 +163,22 @@ export class Supervisor {
       if (id.length === 0) {
         throw new Error(`resume_from_path: cannot derive lattice id from "${sqlitePath}"`);
       }
-      if (this.records.has(id)) {
-        throw new Error(`resume_from_path: a lattice with id "${id}" is already running; stop it first`);
+      const existing = this.records.get(id);
+      if (existing) {
+        // A stopped/crashed record is retained only so the run stays viewable.
+        // Resuming the SAME entity is allowed: close its (still-open) handle to
+        // release the lock, evict the dead record, then reopen from SQLite.
+        if (existing.status === 'stopped' || existing.status === 'crashed') {
+          existing.loopController?.abort();
+          try {
+            existing.lattice.close();
+          } catch {
+            /* already closed */
+          }
+          this.records.delete(id);
+        } else {
+          throw new Error(`resume_from_path: a lattice with id "${id}" is already running; stop it first`);
+        }
       }
     } else {
       id = req.bundle_id
@@ -169,18 +191,28 @@ export class Supervisor {
     }
 
     const engine = this.buildBackend(req.model_backend);
-    const { senses, actions } = this.buildCapabilities(req.tool_manifest ?? []);
 
-    // Item 4 — every lattice gets a jailed workspace write-root so it can
-    // satisfy the auto-inserted plan gate (and write deliverables). The
-    // bridge job route stats the plan file under this same root. Paired
-    // with a listing sense so the lattice observes what it has written.
+    // Item 16 — director posture: strip file-write/execute tools from the
+    // manifest. The director delegates and verifies; it does not write.
+    const directorMode = req.director === true;
+    const manifest = directorMode
+      ? (req.tool_manifest ?? []).filter((e) => e.kind !== 'fs-write' && e.kind !== 'shell-exec')
+      : (req.tool_manifest ?? []);
+    const { senses, actions } = this.buildCapabilities(manifest);
+
+    // Item 4 — a non-director lattice gets a jailed workspace write-root so
+    // it can satisfy the auto-inserted plan gate (and write deliverables),
+    // paired with a listing sense. A DIRECTOR is provisioned NO write tool
+    // at all (Item 16) — the plan/deliverables are produced by the executor
+    // via delegate, and the gate verifies the result.
     const workspaceRoot = ensureWorkspaceRoot(sqlitePath, id);
-    actions.push(makeFsWriteAction({ name: 'workspace', outDir: workspaceRoot }) as Capability<unknown, unknown>);
-    if (!senses.some((s) => s.name === 'workspace-listing')) {
-      senses.push(
-        makeFsReadSense({ name: 'workspace-listing', root: workspaceRoot }) as Capability<unknown, unknown>,
-      );
+    if (!directorMode) {
+      actions.push(makeFsWriteAction({ name: 'workspace', outDir: workspaceRoot }) as Capability<unknown, unknown>);
+      if (!senses.some((s) => s.name === 'workspace-listing')) {
+        senses.push(
+          makeFsReadSense({ name: 'workspace-listing', root: workspaceRoot }) as Capability<unknown, unknown>,
+        );
+      }
     }
 
     // Item 11 — Layer 1 is composed from the declared persona bundles with
@@ -194,7 +226,7 @@ export class Supervisor {
       // Item 10 — Layer 1 (persona) + dispositions; Layer 2 (init) is the
       // optional init_seed, promoted to memory once.
       identity: {
-        composed_body: personaLayer1 + PLANNING_DISPOSITION,
+        composed_body: personaLayer1 + PLANNING_DISPOSITION + (directorMode ? DIRECTOR_DISPOSITION : ''),
         ...(req.init_seed ? { initLayer: req.init_seed } : {}),
       },
       engine,
@@ -349,9 +381,10 @@ export class Supervisor {
     if (!r) return false;
     r.loopController?.abort();
     if (r.loopPromise) await r.loopPromise;
-    r.lattice.close();
     r.status = 'stopped';
-    this.records.delete(id);
+    // Keep the record + DB handle so a cleanly-stopped run stays viewable
+    // (trace, memory, visualizer) instead of vanishing. Full teardown — the
+    // DB close — happens on process shutdown via closeAll().
     return true;
   }
 
@@ -363,9 +396,20 @@ export class Supervisor {
     return true;
   }
 
-  /** Close everything (graceful shutdown). */
+  /** Close everything (graceful shutdown) — abort loops AND close DBs. */
   async closeAll(): Promise<void> {
-    await Promise.all([...this.records.keys()].map((id) => this.stop(id)));
+    await Promise.all(
+      [...this.records.values()].map(async (r) => {
+        r.loopController?.abort();
+        if (r.loopPromise) await r.loopPromise;
+        try {
+          r.lattice.close();
+        } catch {
+          /* already closed */
+        }
+      }),
+    );
+    this.records.clear();
   }
 
   private toRow(r: Record): RosterRow {

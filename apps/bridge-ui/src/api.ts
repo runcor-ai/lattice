@@ -5,6 +5,7 @@ import type {
   JobsHand,
   RosterRow,
   TraceQuery,
+  TraceRow,
 } from '@runcor/bridge-shared';
 
 /**
@@ -52,6 +53,48 @@ export const Api = {
     if (q.after_cycle !== undefined) sp.set('after_cycle', String(q.after_cycle));
     return http<Record<string, unknown>[]>(`/api/lattices/${id}/trace?${sp.toString()}`);
   },
+  /**
+   * Windowed trace read for the visualizer — fetches a bounded cycle range
+   * [after_cycle, before_cycle) so scrubbing across thousands of cycles never
+   * loads the whole run. Returns flat rows with a stable `id`.
+   */
+  traceRange: (
+    id: string,
+    q: { after_cycle?: number; before_cycle?: number; limit?: number } = {},
+  ) => {
+    const sp = new URLSearchParams();
+    if (q.after_cycle !== undefined) sp.set('after_cycle', String(q.after_cycle));
+    if (q.before_cycle !== undefined) sp.set('before_cycle', String(q.before_cycle));
+    sp.set('limit', String(q.limit ?? 1000));
+    return http<TraceRow[]>(`/api/lattices/${id}/trace?${sp.toString()}`);
+  },
+  /** The lattice's mind: situation summary, episodic/semantic/identity memories (each with why), plan, goals. */
+  memory: (id: string, limit = 30) =>
+    http<{
+      situation: string | null;
+      situation_cycle: number | null;
+      episodic: Array<{ cycle: number; body: string; why: string }>;
+      semantic: Array<{ cycle: number; body: string; why: string }>;
+      identity: Array<{ cycle: number; body: string; why: string }>;
+      goals: Array<{ body: string; state: string; why: string }>;
+      plan: Array<{ ordinal: number; description: string; state: string }>;
+      jobs: Array<{
+        id: string;
+        title: string;
+        body: string;
+        why: string;
+        status: string;
+        items: Array<{ ordinal: number; description: string; state: string }>;
+      }>;
+    }>(`/api/lattices/${id}/memory?limit=${limit}`),
+  /** A Claude pass that summarizes the lattice's overall job + progress. */
+  jobSummary: (id: string) =>
+    http<{ summary: string | null }>(`/api/lattices/${id}/job-summary`),
+  /** A Claude pass that summarizes a cycle's chain of thought (cached server-side). */
+  cycleSummary: (id: string, cycle: number, cachedOnly = false) =>
+    http<{ cycle: number; summary: string | null; cached: boolean }>(
+      `/api/lattices/${id}/cycles/${cycle}/summary${cachedOnly ? '?cached_only=1' : ''}`,
+    ),
   patchDials: (id: string, dials: Record<string, unknown>, why: string) =>
     http<{ applied_at_cycle: number }>(`/api/lattices/${id}/dials`, {
       method: 'PATCH',

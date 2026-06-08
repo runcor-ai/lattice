@@ -50,7 +50,7 @@ function go(path: string) {
 
 <style scoped>
 .shell {
-  min-height: 100vh;
+  height: 100vh;
   display: grid;
   grid-template-rows: auto 1fr auto;
 }
@@ -112,6 +112,11 @@ function go(path: string) {
   max-width: 1400px;
   width: 100%;
   margin: 0 auto;
+  /* Let the 1fr row constrain to the viewport and scroll its own overflow,
+     so tall views (roster) scroll here while fixed-height views (the
+     visualizer) fill exactly without growing the page. */
+  min-height: 0;
+  overflow-y: auto;
 }
 .footer {
   display: flex;

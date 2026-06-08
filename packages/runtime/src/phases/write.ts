@@ -4,6 +4,7 @@ import type { AutonomyLevel } from '@runcor/substrate';
 import type { TraceEntry } from '@runcor/trace';
 
 import { MEDIUM_CLOCK_EVERY, runFastClock, runMediumClock } from '../memory-clocks.js';
+import { recordProgress } from '../no-progress.js';
 import type { RuntimeMemoryAdapter } from '../sqlite-memory.js';
 import type { CycleContext, JudgeOutput, WriteOutput } from '../types.js';
 
@@ -122,6 +123,10 @@ export async function write(ctx: CycleContext, prev: JudgeOutput): Promise<Write
     // sat in status='open' forever (the 773-cycle noop bug).
     autoAttemptJobClose(jobs, job.id, ctx);
   }
+
+  // Item 15 — record whether the work MOVED this cycle (open-job item/gate
+  // state changed). The act phase reads this next cycle to detect a stall.
+  recordProgress(db);
 
   // Item 1 — fast/medium memory clocks, the post-write inter-cycle work.
   // Fast every cycle (refresh the situation report the next prompt reads);
