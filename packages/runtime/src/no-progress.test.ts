@@ -56,6 +56,41 @@ describe('no-progress signature + counter (Item 15)', () => {
     expect(recordProgress(db)).toBe(3); // keeps climbing toward the threshold
   });
 
+  it('Finding #7: appending checklist items does NOT reset; only a closure does', () => {
+    const db = progressDb();
+    db.prepare("INSERT INTO plan_job VALUES ('j','open')").run();
+    db.prepare("INSERT INTO plan_item VALUES ('i1','j','open')").run();
+    recordProgress(db); // 0
+    expect(recordProgress(db)).toBe(1);
+    db.prepare("INSERT INTO plan_item VALUES ('i2','j','open')").run(); // entity grows its own checklist
+    expect(recordProgress(db)).toBe(2); // append is not progress — keeps climbing (was the bug)
+    db.prepare("INSERT INTO plan_item VALUES ('i3','j','open')").run();
+    expect(recordProgress(db)).toBe(3);
+    db.prepare("UPDATE plan_item SET state='passed' WHERE id='i2'").run(); // a real closure
+    expect(recordProgress(db)).toBe(0); // resets cleanly on genuine progress
+    expect(recordProgress(db)).toBe(1); // and climbs again after
+  });
+
+  it('Finding #7: deferring/blocking an item is being stuck, not progress', () => {
+    const db = progressDb();
+    db.prepare("INSERT INTO plan_job VALUES ('j','open')").run();
+    db.prepare("INSERT INTO plan_item VALUES ('i1','j','open')").run();
+    recordProgress(db); // 0
+    expect(recordProgress(db)).toBe(1);
+    db.prepare("UPDATE plan_item SET state='deferred' WHERE id='i1'").run();
+    expect(recordProgress(db)).toBe(2); // deferred is not a closure — still climbing
+  });
+
+  it('a new open job (open-job set changed) counts as progress', () => {
+    const db = progressDb();
+    db.prepare("INSERT INTO plan_job VALUES ('j1','open')").run();
+    db.prepare("INSERT INTO plan_item VALUES ('i1','j1','open')").run();
+    recordProgress(db); // 0
+    expect(recordProgress(db)).toBe(1);
+    db.prepare("INSERT INTO plan_job VALUES ('j2','open')").run(); // a second job opens
+    expect(recordProgress(db)).toBe(0); // open-job set changed → progress
+  });
+
   it('no open jobs resets the counter', () => {
     const db = progressDb();
     db.prepare("INSERT INTO plan_job VALUES ('j','open')").run();

@@ -124,8 +124,9 @@ export async function write(ctx: CycleContext, prev: JudgeOutput): Promise<Write
     autoAttemptJobClose(jobs, job.id, ctx);
   }
 
-  // Item 15 — record whether the work MOVED this cycle (open-job item/gate
-  // state changed). The act phase reads this next cycle to detect a stall.
+  // Item 15 — record whether the work MOVED this cycle (an open-job item
+  // closed, or the open-job set changed). The act phase reads this next
+  // cycle to detect a stall.
   recordProgress(db);
 
   // Item 1 — fast/medium memory clocks, the post-write inter-cycle work.
