@@ -1,3 +1,4 @@
+import { extractRpp } from '@runcor/decider';
 import type { ModelBackend } from '@runcor/engine';
 import { parse } from '@runcor/rpp-parser';
 import type { RppPrompt } from '@runcor/substrate';
@@ -27,5 +28,5 @@ export async function runJudge(
     ...(opts.maxTokens !== undefined ? { maxTokens: opts.maxTokens } : {}),
     ...(opts.abortSignal !== undefined ? { abortSignal: opts.abortSignal } : {}),
   });
-  return { text: r.text, parsed: parse(r.text) };
+  return { text: r.text, parsed: parse(extractRpp(r.text)) };
 }

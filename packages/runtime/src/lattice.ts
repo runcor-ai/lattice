@@ -24,6 +24,9 @@ export interface LatticeSqliteConfig {
 export interface LatticeOptions {
   readonly identity: LatticeIdentity;
   readonly engine: ModelBackend;
+  /** Optional second voice for the dialectic Coach (e.g. an OpenRouter model).
+   *  Player + Judge use `engine`; Coach uses this when present. */
+  readonly coachEngine?: ModelBackend;
   readonly senses?: readonly Capability<unknown, unknown>[];
   readonly actions?: readonly Capability<unknown, unknown>[];
   readonly trace?: TraceOptions;
@@ -57,6 +60,7 @@ export interface LatticeOptions {
 export class Lattice {
   readonly identity: LatticeIdentity;
   engine: ModelBackend;
+  private readonly coachEngine: ModelBackend | undefined;
   readonly trace: Trace;
   readonly memory: SqliteMemorySink;
   readonly senses: readonly Capability<unknown, unknown>[];
@@ -74,6 +78,7 @@ export class Lattice {
   constructor(opts: LatticeOptions) {
     this.identity = opts.identity;
     this.engine = opts.engine;
+    this.coachEngine = opts.coachEngine;
     this.senses = opts.senses ?? [];
     this.actions = opts.actions ?? [];
     this.autonomy = opts.autonomy ?? 'medium';
@@ -84,7 +89,11 @@ export class Lattice {
         { engine: this.engine },
         {
           dialecticDepth: opts.dialecticDepth ?? 0,
-          buildDialectic: (deps, depth) => new DialecticDecider(deps, { depth }),
+          buildDialectic: (deps, depth) =>
+            new DialecticDecider(deps, {
+              depth,
+              ...(this.coachEngine ? { coachEngine: this.coachEngine } : {}),
+            }),
         },
       );
 
@@ -303,7 +312,11 @@ export class Lattice {
         { engine: this.engine },
         {
           dialecticDepth: this.decider.name === 'dialectic' ? 1 : 0,
-          buildDialectic: (deps, depth) => new DialecticDecider(deps, { depth }),
+          buildDialectic: (deps, depth) =>
+            new DialecticDecider(deps, {
+              depth,
+              ...(this.coachEngine ? { coachEngine: this.coachEngine } : {}),
+            }),
         },
       );
     }
