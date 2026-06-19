@@ -25,6 +25,14 @@ const RECENT_ACTIONS_LIMIT = 24;
 const RECENT_ACTION_MAX_BYTES = 280;
 
 /**
+ * Caps for surfacing sensed DATA in the reality slice (not just status). Per-sense
+ * bounds any one sense; total bounds the whole senses block so a many-sense lattice
+ * cannot blow the context window. 4 KB/sense × up to 16 KB total.
+ */
+const PER_SENSE_DATA_CAP = 4096;
+const TOTAL_SENSE_DATA_CAP = 16384;
+
+/**
  * ground — substrate-wrap the cycle's prompt (slice 5).
  *
  * Per constitution Principle VIII + spec FR-018: every model call's
@@ -42,8 +50,22 @@ export async function ground(
   ctx: CycleContext,
   prev: ObserveOutput,
 ): Promise<GroundOutput> {
+  // Surface the sensed DATA (capped), not just the 'ok'/'failed' status — without
+  // this the entity is blind to its own corpus (a digest sense's content, a listing).
+  // Hard caps keep many-sense lattices from blowing the context window.
+  let senseDataBudget = TOTAL_SENSE_DATA_CAP;
   const senseSummary = Object.values(prev.perception.senses)
-    .map((r) => `- ${r.capability}: ${r.result}`)
+    .map((r) => {
+      const head = `- ${r.capability}: ${r.result}`;
+      if (r.result === 'failed' || senseDataBudget <= 0) return head;
+      let d = renderSenseData(r.data);
+      if (!d) return head;
+      if (d.length > PER_SENSE_DATA_CAP) d = `${d.slice(0, PER_SENSE_DATA_CAP)}…[capped]`;
+      if (d.length > senseDataBudget) d = `${d.slice(0, senseDataBudget)}…[budget]`;
+      senseDataBudget -= d.length;
+      const indented = d.split('\n').map((l) => `    ${l}`).join('\n');
+      return `${head}\n${indented}`;
+    })
     .join('\n');
 
   const actionMenu = renderActionMenu(ctx.actions);
@@ -64,7 +86,7 @@ export async function ground(
   const noProgress = readNoProgressCycles((ctx.memory as RuntimeMemoryAdapter).dbHandle());
   const noProgressBlock =
     noProgress >= NO_PROGRESS_THRESHOLD
-      ? `NO PROGRESS — ${noProgress} cycles have passed with no plan item closing and no gate clearing. The current approach is NOT working. Change posture NOW: delegate the work differently, re-brief the open item with a sharper gate, verify what already exists on disk, or escalate. Do not repeat what you have been doing.`
+      ? `NO PROGRESS — ${noProgress} cycles with no item closing or gate clearing. The current approach is NOT working. Before any more fetching, reading, or inventorying, STOP and re-examine YOUR OWN state and assumptions: Are you misusing a tool (a path that keeps failing? paths are relative to each tool's stated root — do not re-prepend the root, e.g. use "center.md", not "ledger/center.md")? Repeating an action that already failed? Ignoring data you ALREADY hold (your senses this cycle already surface the corpus content — reason over it instead of re-fetching)? And do NOT loop to perfect or verify one source: if a fact cannot be confirmed now (dead link, missing source), COMMIT your best integrated judgment and FLAG that claim as unverified — a sound analyst writes "this figure is unverified, flagged" and produces the deliverable, rather than chasing a single source. Produce the deliverable from what you already have.`
       : '';
 
   const groundedPrompt = wrap({
@@ -138,6 +160,7 @@ export async function ground(
       '',
       'In BEHAVIOR Decide: cite the evidence (sense reading, memory, or task item) by name in one sentence.',
       'When you have produced the deliverable for an open task item, close it on the next cycle via close-job-item using the item id shown in the open tasks block. Do not re-write a deliverable that already exists unless the previous version is materially wrong.',
+      'If you are stuck — a tool call that keeps failing, the same action repeated, or a source you cannot retrieve — STOP and re-examine your OWN state before fetching or inventorying again: are you misusing a tool (paths are relative to each tool’s stated root — do NOT re-prepend the root), repeating an action that already failed, or ignoring data you ALREADY hold (the corpus content is in your senses THIS cycle — reason over it instead of re-fetching)? Do NOT loop to verify or perfect one source: if a fact cannot be confirmed now (dead link, a command syntax you cannot get right), COMMIT your best integrated judgment and FLAG that claim as unverified — a sound analyst writes "this figure is unverified, flagged" and produces the deliverable from what is already in hand rather than chasing one input.',
     ].join('\n'),
   });
 
@@ -198,6 +221,32 @@ function renderRecentActions(recall: MemoryRecallView): string {
 function truncate(s: string, max: number): string {
   if (s.length <= max) return s;
   return `${s.slice(0, max - 1)}…`;
+}
+
+/**
+ * Render a sense's DATA to a readable string for the reality slice. Recognises the
+ * digest sense (content) and the fs-read listing (file names); falls back to compact
+ * JSON. Caller caps length. Returns '' when there's nothing useful to show.
+ */
+function renderSenseData(data: unknown): string {
+  if (data == null) return '';
+  if (typeof data === 'string') return data;
+  if (typeof data === 'object') {
+    const o = data as Record<string, unknown>;
+    if (typeof o.digest === 'string') return o.digest; // fs-digest sense — corpus content
+    if (Array.isArray(o.entries)) {
+      const list = (o.entries as Array<{ path: string; bytes: number }>).map(
+        (e) => `${e.path} (${e.bytes}b)`,
+      );
+      return `files (${(o.fileCount as number) ?? list.length}):\n${list.join('\n')}`;
+    }
+    try {
+      return JSON.stringify(o);
+    } catch {
+      return String(o);
+    }
+  }
+  return String(data);
 }
 
 /**

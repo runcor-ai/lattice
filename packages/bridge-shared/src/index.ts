@@ -47,6 +47,7 @@ export const ManifestEntrySchema = z.object({
     'noop',
     'fs-read',
     'fs-read-content',
+    'fs-digest',
     'fs-write',
     'shell-exec',
     'claude-delegate',
