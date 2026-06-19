@@ -21,6 +21,7 @@ import {
 } from '@runcor/capabilities';
 import {
   ClaudeCodeHostBackend,
+  OpenRouterBackend,
   spawnCliRunner,
   StubBackend,
   type ModelBackend,
@@ -191,6 +192,9 @@ export class Supervisor {
     }
 
     const engine = this.buildBackend(req.model_backend);
+    // Optional second voice for the dialectic Coach (e.g. OpenRouter Nemotron).
+    // Player + Judge use `engine`; Coach uses this when present.
+    const coachEngine = req.coach_backend ? this.buildBackend(req.coach_backend) : undefined;
 
     // Item 16 — director posture: strip file-write/execute tools from the
     // manifest. The director delegates and verifies; it does not write.
@@ -230,6 +234,7 @@ export class Supervisor {
         ...(req.init_seed ? { initLayer: req.init_seed } : {}),
       },
       engine,
+      ...(coachEngine ? { coachEngine } : {}),
       senses,
       actions,
       sqlite: { path: sqlitePath },
@@ -596,6 +601,11 @@ export class Supervisor {
 
   private buildBackend(spec: ModelBackendSpec): ModelBackend {
     switch (spec.kind) {
+      case 'openrouter':
+        return new OpenRouterBackend({
+          model: spec.config.model,
+          ...(spec.config.baseUrl ? { baseUrl: spec.config.baseUrl } : {}),
+        });
       case 'stub':
         return new StubBackend();
       case 'claude-code-host':

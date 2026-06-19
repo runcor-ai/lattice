@@ -11,3 +11,4 @@ export {
   type CliResult,
   type SpawnRunnerOptions,
 } from './claude-code-host-backend.js';
+export { OpenRouterBackend, type OpenRouterOptions } from './openrouter-backend.js';
