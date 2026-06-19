@@ -1,3 +1,4 @@
+import { extractRpp } from '@runcor/decider';
 import type { ModelBackend } from '@runcor/engine';
 import { parse } from '@runcor/rpp-parser';
 import type { RppPrompt } from '@runcor/substrate';
@@ -23,5 +24,7 @@ export async function runPlayer(
     ...(opts.maxTokens !== undefined ? { maxTokens: opts.maxTokens } : {}),
     ...(opts.abortSignal !== undefined ? { abortSignal: opts.abortSignal } : {}),
   });
-  return { text: r.text, parsed: parse(r.text) };
+  // Strip any prose/markdown around the R++ block before parsing (mirrors
+  // SingleModelDecider) — raw parse fails when the model wraps R++ in text.
+  return { text: r.text, parsed: parse(extractRpp(r.text)) };
 }

@@ -82,6 +82,10 @@ export const ModelBackendSpecSchema = z.discriminatedUnion('kind', [
     kind: z.literal('stub'),
     config: z.record(z.unknown()).optional(),
   }),
+  z.object({
+    kind: z.literal('openrouter'),
+    config: z.object({ model: z.string().min(1), baseUrl: z.string().optional() }),
+  }),
 ]);
 export type ModelBackendSpec = z.infer<typeof ModelBackendSpecSchema>;
 
@@ -116,6 +120,9 @@ export const InstantiateSchema = z.object({
   dials: z.record(DialValueSchema).default({}),
   tool_manifest: z.array(ManifestEntrySchema).default([]),
   model_backend: ModelBackendSpecSchema,
+  /** Optional second voice for the dialectic Coach (genuine two-instance dialectic).
+   *  Player + Judge use model_backend; Coach uses this. Typically an openrouter model. */
+  coach_backend: ModelBackendSpecSchema.optional(),
   snapshot: SnapshotDestSchema.optional(),
   bundle_id: z.string().optional(),
   autonomy: AutonomySchema.default('medium'),
