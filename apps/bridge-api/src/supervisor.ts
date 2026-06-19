@@ -472,7 +472,13 @@ export class Supervisor {
           break;
         }
         case 'fs-digest': {
-          const cfg = (entry.config ?? {}) as { root?: string; totalBytes?: number };
+          const cfg = (entry.config ?? {}) as {
+            root?: string;
+            totalBytes?: number;
+            priorityFiles?: string[];
+            maxFiles?: number;
+            skipDirs?: string[];
+          };
           if (typeof cfg.root !== 'string' || cfg.root.length === 0) {
             throw new Error(
               `tool_manifest entry "${entry.name}" (fs-digest) requires config.root (absolute path)`,
@@ -483,6 +489,9 @@ export class Supervisor {
               name: entry.name,
               root: cfg.root,
               ...(typeof cfg.totalBytes === 'number' ? { totalBytes: cfg.totalBytes } : {}),
+              ...(Array.isArray(cfg.priorityFiles) ? { priorityFiles: cfg.priorityFiles } : {}),
+              ...(typeof cfg.maxFiles === 'number' ? { maxFiles: cfg.maxFiles } : {}),
+              ...(Array.isArray(cfg.skipDirs) ? { skipDirs: cfg.skipDirs } : {}),
             }) as Capability<unknown, unknown>,
           );
           sawSense = true;
