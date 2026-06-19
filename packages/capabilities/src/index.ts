@@ -7,6 +7,11 @@ export {
   type FsReadSenseOptions,
 } from './fs-read-sense.js';
 export {
+  makeFsDigestSense,
+  type FsDigestReading,
+  type FsDigestSenseOptions,
+} from './fs-digest-sense.js';
+export {
   makeFsReadContentAction,
   type FsReadContentInput,
   type FsReadContentReading,

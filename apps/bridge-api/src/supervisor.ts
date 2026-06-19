@@ -12,6 +12,7 @@ import type {
 import {
   makeClaudeDelegateAction,
   makeEchoSense,
+  makeFsDigestSense,
   makeFsReadContentAction,
   makeFsReadSense,
   makeFsWriteAction,
@@ -465,6 +466,23 @@ export class Supervisor {
               name: entry.name,
               root,
               ...(typeof maxEntries === 'number' ? { maxEntries } : {}),
+            }) as Capability<unknown, unknown>,
+          );
+          sawSense = true;
+          break;
+        }
+        case 'fs-digest': {
+          const cfg = (entry.config ?? {}) as { root?: string; totalBytes?: number };
+          if (typeof cfg.root !== 'string' || cfg.root.length === 0) {
+            throw new Error(
+              `tool_manifest entry "${entry.name}" (fs-digest) requires config.root (absolute path)`,
+            );
+          }
+          senses.push(
+            makeFsDigestSense({
+              name: entry.name,
+              root: cfg.root,
+              ...(typeof cfg.totalBytes === 'number' ? { totalBytes: cfg.totalBytes } : {}),
             }) as Capability<unknown, unknown>,
           );
           sawSense = true;
