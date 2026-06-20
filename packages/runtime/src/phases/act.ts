@@ -1,4 +1,5 @@
 import { actOne, type ActContext } from '@runcor/capabilities';
+import { JobsService } from '@runcor/jobs';
 
 import {
   dominantRecentAction,
@@ -6,6 +7,7 @@ import {
   NO_PROGRESS_THRESHOLD,
   readNoProgressCycles,
 } from '../no-progress.js';
+import type { Db } from '../db.js';
 import { hashActionInput, isPersistenceViolation, PERSISTENCE_WINDOW, recordAction } from '../persistence.js';
 import type { RuntimeMemoryAdapter } from '../sqlite-memory.js';
 import type { ActOutput, CycleContext, DecideOutput } from '../types.js';
@@ -25,6 +27,37 @@ import type { ActOutput, CycleContext, DecideOutput } from '../types.js';
  * Slice 12 plumbs real budget; slice 14 reads the autonomy dial
  * straight from the entity table.
  */
+/**
+ * gap-E circuit-breaker helper. Defer every OPEN item of every OPEN job via the
+ * existing checklist machinery (markDeferred → state 'deferred' + reason). Leaving
+ * a job with no open items lets the write-phase auto-close finish it (closed_partial),
+ * which drops the lattice into the existing paused_no_jobs idle. Best-effort: any
+ * schema/edge failure is swallowed so the park (caller's return) still happens.
+ */
+function deferOpenJobItems(db: Db, cycle: number, reason: string): number {
+  let n = 0;
+  try {
+    const jobs = new JobsService(db);
+    const openJobs = db.prepare(`SELECT id FROM plan_job WHERE status = 'open'`).all() as Array<{ id: string }>;
+    for (const { id } of openJobs) {
+      for (const item of jobs.checklist.items(id)) {
+        if (item.state === 'open') {
+          jobs.checklist.markDeferred(item.id, {
+            cycle,
+            reason,
+            unblockCondition: 'new work or signal arrives (next feed cycle), or an operator reopens the item',
+            unblockTest: 'a new job is posted to this lattice',
+          });
+          n += 1;
+        }
+      }
+    }
+  } catch {
+    /* minimal/edge schema — caller still parks via its return */
+  }
+  return n;
+}
+
 export async function act(ctx: CycleContext, prev: DecideOutput): Promise<ActOutput> {
   const db = (ctx.memory as RuntimeMemoryAdapter).dbHandle();
   const inputHash = prev.chosenAction ? hashActionInput(prev.chosenInput) : '';
@@ -46,26 +79,45 @@ export async function act(ctx: CycleContext, prev: DecideOutput): Promise<ActOut
     };
   }
 
-  // Item 15 — no-progress law. If the work has stalled (no open-job item
-  // or gate has moved for >= N cycles) and the lattice keeps choosing the
-  // dominant (stalled) action, refuse it to force a posture change. At 2N,
-  // also escalate. Persistence cannot see this — the stalled action's
-  // inputs vary cycle to cycle; what is constant is the lack of movement.
+  // Item 15 — no-progress law. Two thresholds:
+  //   THRESHOLD (N): refuse the dominant (stalled) action to force a posture change.
+  //   ESCALATE (2N): the stall is terminal — take an autonomous TERMINAL action.
+  // Persistence cannot see this — the stalled action's inputs vary cycle to cycle;
+  // what is constant is the lack of movement.
   const noProgress = readNoProgressCycles(db);
+
+  // gap E (circuit-breaker, Finding #13). At ESCALATE the floor must END the stall,
+  // not just nudge: the live failure showed the entity DODGES the per-action block by
+  // alternating actions (ledger ↔ append-plan-item), so a block alone never terminates
+  // it — it spun 140 cycles. So, REGARDLESS of which action is chosen, auto-defer the
+  // open job item(s) with a logged reason. The write phase's existing auto-close then
+  // closes the now-itemless job (closed_partial at high autonomy) → the lattice falls
+  // into the EXISTING paused_no_jobs idle → the next job (e.g. next feed cycle)
+  // auto-resumes it. This is the necessary partner to the #12 confabulation gate: the
+  // gate refuses a bad/unsupported commit, and E ends the resulting stall by PARKING
+  // honestly instead of spinning. Without E, every gate refusal becomes a spin.
+  if (noProgress >= NO_PROGRESS_ESCALATE) {
+    const reason = `no-progress circuit-breaker: ${noProgress} cycles without any item closing or gate clearing — autonomous park`;
+    const deferred = deferOpenJobItems(db, ctx.cycle, reason);
+    ctx.trace.write({
+      kind: 'substrate',
+      cycle: ctx.cycle,
+      at_ms: ctx.at_ms,
+      phase: 'act',
+      outcome: 'escalate',
+      law: 'no-progress',
+      reason: `${noProgress} cycles without progress; deferred ${deferred} open item(s) and parked to idle (gap-E circuit-breaker)`,
+    });
+    return {
+      ...prev,
+      actResult: 'failed',
+      actFailedReason: `No-progress circuit-breaker: deferred ${deferred} open item(s) after ${noProgress} cycles without progress. Parked to idle — will resume when new work/signal arrives.`,
+    };
+  }
+
   if (prev.chosenAction && noProgress >= NO_PROGRESS_THRESHOLD) {
     const dominant = dominantRecentAction(db);
     if (dominant && prev.chosenAction === dominant) {
-      if (noProgress >= NO_PROGRESS_ESCALATE) {
-        ctx.trace.write({
-          kind: 'substrate',
-          cycle: ctx.cycle,
-          at_ms: ctx.at_ms,
-          phase: 'act',
-          outcome: 'escalate',
-          law: 'no-progress',
-          reason: `${noProgress} cycles without item/gate progress; escalating to operator`,
-        });
-      }
       ctx.trace.write({
         kind: 'substrate',
         cycle: ctx.cycle,
