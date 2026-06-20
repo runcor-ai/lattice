@@ -9,6 +9,9 @@ import {
   openJobItemSignature,
   recordProgress,
 } from './no-progress.js';
+import { JobsService } from '@runcor/jobs';
+
+import { migrate } from './migrations.js';
 import { act } from './phases/act.js';
 import type { CycleContext, DecideOutput } from './types.js';
 
@@ -171,5 +174,30 @@ describe('act phase enforces no-progress (Item 15)', () => {
     const traces: Array<Record<string, unknown>> = [];
     await act(makeCtx(db, traces), prevWith('probe'));
     expect(traces.some((t) => t.law === 'no-progress' && t.outcome === 'escalate')).toBe(true);
+  });
+
+  it('gap E: at ESCALATE the open job item is auto-DEFERRED (circuit-breaker parks instead of nudging)', async () => {
+    const db = new Database(':memory:') as unknown as Db;
+    migrate(db);
+    const jobs = new JobsService(db);
+    const job = jobs.openJob({ title: 'stuck', source: 'test', why: 'reproduce a stall', cycle: 1, at_ms: 1 });
+    const item = jobs.addItem(job.id, {
+      description: 'a deliverable that can never pass its gate',
+      spec: { hooks: [{ name: 'file_exists', args: { path: 'Z:/never/exists.md' } }] },
+    });
+    // a sustained stall: the no-progress counter has reached the escalation threshold
+    db.prepare("INSERT INTO progress_state (id, no_progress_cycles, last_signature) VALUES ('self', ?, 'p0:j1')").run(
+      NO_PROGRESS_ESCALATE,
+    );
+    db.prepare('INSERT INTO recent_action VALUES (1,?,?)').run('probe', 'h1');
+
+    const traces: Array<Record<string, unknown>> = [];
+    const r = await act(makeCtx(db, traces), prevWith('probe'));
+
+    expect(r.actResult).toBe('failed');
+    expect(r.actFailedReason).toMatch(/circuit-breaker/);
+    expect(traces.some((t) => t.law === 'no-progress' && t.outcome === 'escalate')).toBe(true);
+    // the teeth: the open item is now DEFERRED (parked), not left open to spin on
+    expect(jobs.checklist.getItem(item.id)?.state).toBe('deferred');
   });
 });
