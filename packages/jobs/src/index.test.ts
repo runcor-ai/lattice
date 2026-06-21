@@ -230,6 +230,61 @@ describe('Partial close (T181 / FR-037)', () => {
   });
 });
 
+/* ===== #17 — close keys on the operator/system contract, not entity planning ===== */
+
+describe('#17 — job-close ignores the entity\'s self-added plan_step/lattice_appended items', () => {
+  it('operator item passed + an OPEN plan_step → closes (self-added planning does not gate)', async () => {
+    const svc = new JobsService(freshDb());
+    const job = svc.openJob({ title: 'forecast', source: 'operator', why: 'y', cycle: 1, at_ms: 1 });
+    const deliverable = svc.addItem(job.id, { description: 'write the forecast', spec: spec('always_pass'), source: 'operator' });
+    // entity decomposes the work into its own checklist — these must NOT block close
+    svc.addItem(job.id, { description: 'plan: PROTOCOLS sub-analysis', spec: spec('always_fail'), source: 'plan_step' });
+    svc.addItem(job.id, { description: 'plan: close item X then Y', spec: spec('always_fail'), source: 'plan_step' });
+    await svc.attemptCheck(deliverable.id, { cycle: 1 }); // operator deliverable passes
+    const r = svc.close({ jobId: job.id, cycle: 2, at_ms: 2, autonomy: 'high' });
+    expect(r.result).toBe('closed');
+    if (r.result === 'closed') expect(r.mode).toBe('full'); // plan_steps ignored, not counted as deferred
+  });
+
+  it('an OPEN operator item still blocks close even if every plan_step passed', async () => {
+    const svc = new JobsService(freshDb());
+    const job = svc.openJob({ title: 'forecast', source: 'operator', why: 'y', cycle: 1, at_ms: 1 });
+    svc.addItem(job.id, { description: 'write the forecast', spec: spec('always_fail'), source: 'operator' }); // open contract
+    const ps = svc.addItem(job.id, { description: 'plan step', spec: spec('always_pass'), source: 'plan_step' });
+    await svc.attemptCheck(ps.id, { cycle: 1 });
+    const r = svc.close({ jobId: job.id, cycle: 2, at_ms: 2, autonomy: 'high' });
+    expect(r.result).toBe('not_ready'); // operator contract unmet → no close, entity cannot self-close around it
+  });
+
+  it('lattice_appended items are also treated as self-added (ignored for close)', async () => {
+    const svc = new JobsService(freshDb());
+    const job = svc.openJob({ title: 'forecast', source: 'operator', why: 'y', cycle: 1, at_ms: 1 });
+    const op = svc.addItem(job.id, { description: 'deliverable', spec: spec('always_pass'), source: 'operator' });
+    svc.addItem(job.id, { description: 'self-appended extra', spec: spec('always_fail'), source: 'lattice_appended' });
+    await svc.attemptCheck(op.id, { cycle: 1 });
+    const r = svc.close({ jobId: job.id, cycle: 2, at_ms: 2, autonomy: 'high' });
+    expect(r.result).toBe('closed');
+  });
+
+  it('defensive: a job with ONLY self-added items falls back to gating on all of them (never a vacuous close)', () => {
+    const svc = new JobsService(freshDb());
+    const job = svc.openJob({ title: 'self-only', source: 'operator', why: 'y', cycle: 1, at_ms: 1 });
+    svc.addItem(job.id, { description: 'plan step', spec: spec('always_fail'), source: 'plan_step' }); // open, no contract items
+    const r = svc.close({ jobId: job.id, cycle: 2, at_ms: 2, autonomy: 'high' });
+    expect(r.result).toBe('not_ready'); // fallback: no contract items → all items gate → still open
+  });
+
+  it('system gates remain part of the contract (a still-open system gate blocks close)', async () => {
+    const svc = new JobsService(freshDb());
+    const job = svc.openJob({ title: 'forecast', source: 'operator', why: 'y', cycle: 1, at_ms: 1 });
+    const op = svc.addItem(job.id, { description: 'deliverable', spec: spec('always_pass'), source: 'operator' });
+    svc.addItem(job.id, { description: 'system: draft a plan first', spec: spec('always_fail'), source: 'system' }); // open system gate
+    await svc.attemptCheck(op.id, { cycle: 1 });
+    const r = svc.close({ jobId: job.id, cycle: 2, at_ms: 2, autonomy: 'high' });
+    expect(r.result).toBe('not_ready'); // system gates are contract, not entity planning
+  });
+});
+
 /* ============================== T182 ============================== */
 
 describe('Unblock flow (T182 / FR-038)', () => {
