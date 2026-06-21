@@ -3,9 +3,11 @@ import { JobsService } from '@runcor/jobs';
 
 import {
   dominantRecentAction,
+  isReadCapped,
   NO_PROGRESS_ESCALATE,
   NO_PROGRESS_THRESHOLD,
   readNoProgressCycles,
+  recordSignalRead,
 } from '../no-progress.js';
 import type { Db } from '../db.js';
 import { hashActionInput, isPersistenceViolation, PERSISTENCE_WINDOW, recordAction } from '../persistence.js';
@@ -135,6 +137,35 @@ export async function act(ctx: CycleContext, prev: DecideOutput): Promise<ActOut
     }
   }
 
+  // Read-cap (Finding #16). Re-reading an already-held signal is the dodge the entity
+  // uses instead of committing under ambiguity (posture alone could not stop it). Once a
+  // read-action has consumed a path this run, cap re-reads of that exact (action|path) so
+  // the only productive move left is to WRITE — and the gate-valid HELD-CAVEAT path is the
+  // honest thing to write. SAFE because #12 stands: a forced write cannot fabricate a
+  // revision (gate rejects unsupported REVISED and kill-condition-met HELD-CAVEAT). A first
+  // read and reading genuinely NEW signal are never capped; a commit (item close) resets it.
+  const readCap = prev.chosenAction ? ctx.actions.find((a) => a.name === prev.chosenAction) : undefined;
+  const readPath = typeof (prev.chosenInput as { path?: unknown } | undefined)?.path === 'string'
+    ? (prev.chosenInput as { path: string }).path
+    : '';
+  const readKey = readCap?.readOnly && readPath ? `${prev.chosenAction}|${readPath}` : '';
+  if (readKey && isReadCapped(db, readKey)) {
+    ctx.trace.write({
+      kind: 'substrate',
+      cycle: ctx.cycle,
+      at_ms: ctx.at_ms,
+      phase: 'act',
+      outcome: 'block',
+      law: 'read-cap',
+      reason: `already read "${readPath}" this run; you hold it — commit (REVISE/HOLD/HELD-CAVEAT) instead of re-reading`,
+    });
+    return {
+      ...prev,
+      actResult: 'failed',
+      actFailedReason: `Read-cap: you already read "${readPath}" this run — you HOLD its content. Re-reading is capped to force a decision. Reason over what you hold and COMMIT now: REVISE (if the kill-condition is met) / HOLD / HELD-CAVEAT (if the signal pressures a call but the kill-condition is not yet met). Do NOT re-read.`,
+    };
+  }
+
   const actCtx: ActContext = {
     cycle: ctx.cycle,
     lastReadAtMs: null,
@@ -154,6 +185,8 @@ export async function act(ctx: CycleContext, prev: DecideOutput): Promise<ActOut
       // Record only dispatched (ok) actions — this is what makes idle/
       // failed/denied naturally exempt from the Persistence law.
       if (prev.chosenAction) recordAction(db, prev.chosenAction, inputHash, ctx.cycle);
+      // First successful read of a signal is recorded → a re-read of it is capped (#16).
+      if (readKey) recordSignalRead(db, readKey, ctx.cycle);
       return { ...prev, actResult: 'ok', actData: out.data };
     case 'no-action':
       return { ...prev, actResult: 'no-action' };
