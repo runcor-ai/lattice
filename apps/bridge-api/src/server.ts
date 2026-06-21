@@ -19,6 +19,7 @@ import {
 import Fastify, { type FastifyInstance } from 'fastify';
 
 import { BundleLoader } from './bundle-loader.js';
+import { readForecastReport } from './forecast.js';
 import { loadPersonaRegistry } from './persona-loader.js';
 import { SecretStore } from './secret-store.js';
 import { cachedSummary, summarizeJob, summarizeThought } from './summarize.js';
@@ -294,6 +295,20 @@ export async function buildServer(opts: BuildServerOptions): Promise<BuiltServer
       return reply
         .code(503)
         .send(errorBody('summarize_failed', err instanceof Error ? err.message : String(err)));
+    }
+  });
+
+  /* --------------- Forecast / predictions (analyst view) --------------- */
+  // Parses this lattice's forecast ledger (baseline standing calls + each dated
+  // forecast cycle) into an analyst-readable report: current calls + confidence,
+  // leading indicators (what would flip a call), revisions, and call evolution.
+  app.get('/api/lattices/:id/forecasts', async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    if (!supervisor.get(id)) return reply.code(404).send(errorBody('lattice_not_found', `no lattice ${id}`));
+    try {
+      return readForecastReport();
+    } catch (err) {
+      return reply.code(500).send(errorBody('forecast_read_failed', err instanceof Error ? err.message : String(err)));
     }
   });
 
