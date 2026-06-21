@@ -41,6 +41,37 @@ function tableExists(db: Db, name: string): boolean {
 }
 
 /**
+ * Read-cap (Finding #16). Posture cannot make the entity commit under ambiguity —
+ * told to commit, it RE-READS the deciding signal instead (15 straight signal-reads,
+ * 0 writes, then a gap-E park). The mechanical fix: once a signal has been READ this
+ * run, cap re-reads of that already-held content, so the only productive move left is
+ * to WRITE — and the gate-valid HELD-CAVEAT path gives it the honest thing to write.
+ * SAFE only because #12 stands: a forced write cannot fabricate a revision (the gate
+ * rejects an unsupported REVISED and a kill-condition-met HELD-CAVEAT), so the
+ * gate-valid escape is the honest output. Reset on a genuine commit (an item closes),
+ * mirroring the no-progress reset — a first read and reading genuinely new signal are
+ * never capped.
+ */
+function ensureHeldSignal(db: Db): void {
+  db.exec(`CREATE TABLE IF NOT EXISTS held_signal (key TEXT PRIMARY KEY, cycle INTEGER NOT NULL)`);
+}
+/** Record that a read-action has consumed `key` (action|path) this run. */
+export function recordSignalRead(db: Db, key: string, cycle: number): void {
+  ensureHeldSignal(db);
+  db.prepare(`INSERT OR IGNORE INTO held_signal (key, cycle) VALUES (?, ?)`).run(key, cycle);
+}
+/** Has this exact read (action|path) already been done since the last commit? */
+export function isReadCapped(db: Db, key: string): boolean {
+  ensureHeldSignal(db);
+  return db.prepare(`SELECT 1 FROM held_signal WHERE key = ?`).get(key) !== undefined;
+}
+/** Clear the held-signal set — called on a genuine commit (an item closed). */
+export function clearHeldSignals(db: Db): void {
+  ensureHeldSignal(db);
+  db.exec(`DELETE FROM held_signal`);
+}
+
+/**
  * A signature of the open jobs' item states. Empty string when there are
  * no open jobs (not stalled — Item 9 idle-pauses that case). Retained for
  * tests / diagnostics; the no-progress counter no longer keys off this (it
@@ -121,8 +152,16 @@ export function recordProgress(db: Db): number {
     count = 0; // first observation this run
   } else {
     const was = parseSig(prev.s);
-    const progressed = now.passed > was.passed || now.openJobs !== was.openJobs;
+    const closed = now.passed > was.passed; // a genuine item CLOSE (commit)
+    const progressed = closed || now.openJobs !== was.openJobs;
     count = progressed ? 0 : prev.c + 1;
+    // The read-cap frees ONLY on a genuine commit (an item closed) — NOT on
+    // openJobs churn (plan-item appends, job toggles). Resetting on mere
+    // openJobs change made the cap fire 1/12 in the live run (it was cleared
+    // between re-reads), the same over-sensitivity that defeated the original
+    // no-progress signal (#7). Tie the reset to a real close so the cap holds
+    // across a churn and actually forces the write.
+    if (closed) clearHeldSignals(db);
   }
   db.prepare(
     `INSERT INTO progress_state (id, no_progress_cycles, last_signature)
