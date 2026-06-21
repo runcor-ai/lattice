@@ -5,6 +5,7 @@ import type { Db } from './db.js';
 import {
   NO_PROGRESS_ESCALATE,
   NO_PROGRESS_THRESHOLD,
+  clearHeldSignals,
   dominantRecentAction,
   openJobItemSignature,
   recordProgress,
@@ -199,5 +200,24 @@ describe('act phase enforces no-progress (Item 15)', () => {
     expect(traces.some((t) => t.law === 'no-progress' && t.outcome === 'escalate')).toBe(true);
     // the teeth: the open item is now DEFERRED (parked), not left open to spin on
     expect(jobs.checklist.getItem(item.id)?.state).toBe('deferred');
+  });
+
+  it('read-cap (#16): a re-read of an already-held signal is blocked (catches near-repeats persistence misses); new signal allowed; commit resets', async () => {
+    const db = new Database(':memory:') as unknown as Db;
+    migrate(db);
+    const traces: Array<Record<string, unknown>> = [];
+    const ctx = makeCtx(db, traces); // actions [probe, other], both readOnly:true
+    // NOTE: vary a NON-path input (maxBytes) so inputHash differs each call — this defeats
+    // the Persistence law, isolating the read-cap (which keys on action|path).
+    const read = (p: string, n: number) => ({ chosenAction: 'probe', chosenInput: { path: p, maxBytes: n } }) as unknown as DecideOutput;
+
+    expect((await act(ctx, read('signal/a.md', 1000))).actResult).toBe('ok'); // first read — recorded
+    const r = await act(ctx, read('signal/a.md', 2000)); // near-repeat (diff maxBytes) — persistence misses, read-cap catches
+    expect(r.actResult).toBe('failed');
+    expect(r.actFailedReason).toMatch(/Read-cap/);
+    expect(traces.some((t) => t.law === 'read-cap' && t.outcome === 'block')).toBe(true);
+    expect((await act(ctx, read('signal/b.md', 1000))).actResult).toBe('ok'); // genuinely NEW signal — allowed
+    clearHeldSignals(db); // a genuine commit (item close) frees the cap
+    expect((await act(ctx, read('signal/a.md', 3000))).actResult).toBe('ok'); // re-read allowed again after commit
   });
 });
