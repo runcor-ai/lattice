@@ -36,6 +36,48 @@ async function http<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+/* ---- Forecast / predictions (analyst view) ---- */
+export type CallStatus = 'HELD' | 'HELD-CAVEAT' | 'REVISED';
+export interface ForecastCall {
+  layer: string;
+  status: CallStatus;
+  confidence: string | null;
+  claim: string | null;
+  prior: string | null;
+  signal: string | null;
+  watching: string | null;
+  whyNotYet: string | null;
+  wouldFlip: string | null;
+  killConditionMet: string | null;
+  why: string | null;
+}
+export interface CurrentCall extends ForecastCall {
+  headline: string | null;
+  prediction: string | null;
+  killCondition: string | null;
+  baselineConfidence: string | null;
+}
+export interface ForecastCycle {
+  file: string;
+  ts: number;
+  iso: string;
+  summary: string;
+  calls: ForecastCall[];
+}
+export interface ForecastReport {
+  generatedAt: string;
+  available: boolean;
+  thesis: { central: string | null; bet: string | null; horizon: string | null };
+  baseline: Array<{ layer: string; headline: string; prediction: string; confidence: string | null; killCondition: string | null }>;
+  current: CurrentCall[];
+  currentAsOf: string | null;
+  watchlist: Array<{ layer: string; wouldFlip: string | null; watching: string | null; whyNotYet: string | null; confidence: string | null }>;
+  revisions: Array<ForecastCall & { iso: string }>;
+  timeline: Record<string, Array<{ iso: string; ts: number; status: CallStatus; confidence: string | null }>>;
+  cycles: ForecastCycle[];
+  counts: { cycles: number; held: number; caveat: number; revised: number };
+}
+
 export const Api = {
   health: () => http<{ ok: boolean }>(`/api/health`),
   roster: () => http<RosterRow[]>(`/api/lattices`),
@@ -117,5 +159,6 @@ export const Api = {
     save: (body: { anthropicApiKey?: string; openaiApiKey?: string }) =>
       http<void>(`/api/secrets`, { method: 'POST', body: JSON.stringify(body) }),
   },
+  forecasts: (id: string) => http<ForecastReport>(`/api/lattices/${id}/forecasts`),
   streamUrl: (id: string) => `/api/lattices/${id}/trace/stream`,
 };

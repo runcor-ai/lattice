@@ -110,6 +110,7 @@ function summarize(entry: UiTraceEntry): string {
         </div>
       </div>
       <div class="inspect-actions">
+        <RouterLink :to="`/lattice/${id}/forecast`" class="viz-link">Forecast ▸</RouterLink>
         <RouterLink :to="`/lattice/${id}/visualize`" class="viz-link">Visualize ▸</RouterLink>
         <button v-if="lattices.selected.status === 'running'" @click="pause">Pause</button>
         <button v-else-if="lattices.selected.status === 'paused'" class="primary" @click="resume">
