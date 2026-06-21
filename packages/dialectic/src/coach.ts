@@ -28,7 +28,12 @@ export async function runCoach(
     'meet a call\'s kill-condition is a HELD-CAVEAT (hold the call, cite the emerging signal as watched, ' +
     'note the kill-condition not yet met) — NOT a reason to keep reading. Do not let it re-read to "be ' +
     'sure." Honest committed uncertainty is the goal. NEVER push it to fabricate a revision the signal ' +
-    'does not support — an unsupported change is worse than an honest hold-with-caveat.';
+    'does not support — an unsupported change is worse than an honest hold-with-caveat. ' +
+    'FORM MATTERS: the commit must be the STRUCTURED gate block, not prose. A hold-with-caveat is the ' +
+    'literal `### HELD-CAVEAT: <LAYER>` block with fields (held / kill_condition_met: no / watching: ' +
+    '<signal path> / why_not_yet / would_flip / confidence). If the draft is correct but written as prose ' +
+    'or a one-call write-up, push it to re-emit as the structured block for ALL six calls in one file — ' +
+    'correct reasoning in the wrong shape still fails the gate and the cycle will not close.';
   const prompt = (COACH_SYSTEM +
     '\n\n<context>\n' + basePrompt + '\n</context>\n' +
     '<dialectic role="coach">\n  Here is the player\'s current draft. Is it dodging a commit — re-reading or hedging — on an ambiguous call? Push it to COMMIT this cycle (revise / hold / hold-with-caveat) WITHOUT fabricating. Emit your critique as an R++ block.\n  <draft>\n' +
