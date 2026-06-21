@@ -19,6 +19,22 @@ import type { Item, Job } from './types.js';
 
 export type ClosureMode = 'full' | 'partial';
 
+/**
+ * #17 — a job's completion CONTRACT is the items handed to it (by the operator,
+ * plus runtime-inserted `system` gates), NOT the entity's own planning. The
+ * entity decomposes work into `plan_step` / `lattice_appended` sub-items freely —
+ * that is how it thinks, and it is good. But those self-added items must NOT gate
+ * job-close: otherwise the entity holds its own job open indefinitely by appending
+ * sub-tasks (observed 2026-06-21 — a forecast job's operator deliverable PASSED,
+ * but 8 self-added plan_steps held the job open while the entity churned
+ * close-job-item). Closure keys on contract items only; the entity's planning is
+ * ignored for close, not suppressed.
+ */
+const ENTITY_SELF_ADDED: ReadonlySet<string> = new Set(['plan_step', 'lattice_appended']);
+function isContractItem(i: Item): boolean {
+  return !ENTITY_SELF_ADDED.has(i.source);
+}
+
 export interface ClosureRequest {
   readonly jobId: string;
   readonly cycle: number;
@@ -50,14 +66,20 @@ export function attemptClose(
   }
 
   const items = checklist.items(req.jobId);
-  const openItems = items.filter((i) => i.state === 'open');
+  // #17 — only the completion CONTRACT (operator/system items) gates closure;
+  // the entity's own plan_step / lattice_appended scaffolding does not. Defensive
+  // fallback: if a job somehow has NO contract items, gate on all items so an
+  // entity-only checklist is never closed vacuously.
+  const contract = items.filter(isContractItem);
+  const gating = contract.length > 0 ? contract : items;
+  const openItems = gating.filter((i) => i.state === 'open');
   if (openItems.length > 0) {
     return {
       result: 'not_ready',
-      reason: `${openItems.length} item(s) still open; cannot close yet`,
+      reason: `${openItems.length} contract item(s) still open; cannot close yet`,
     };
   }
-  const deferred = items.filter((i) => i.state === 'deferred');
+  const deferred = gating.filter((i) => i.state === 'deferred');
   const mode: ClosureMode = deferred.length === 0 ? 'full' : 'partial';
   const status = mode === 'full' ? 'closed_full' : 'closed_partial';
 
@@ -65,7 +87,7 @@ export function attemptClose(
     return {
       result: 'pending_operator',
       mode,
-      reason: `autonomy=low: ${itemsSummary(items)}`,
+      reason: `autonomy=low: ${itemsSummary(gating)}`,
     };
   }
 
