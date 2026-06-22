@@ -6,7 +6,6 @@
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 
-const LAYERS = ['MODELS', 'ORCHESTRATION', 'PROTOCOLS', 'VERTICAL APPS', 'INFRA', 'FUNDING SIGNAL'];
 
 export type CallStatus = 'HELD' | 'HELD-CAVEAT' | 'REVISED';
 
@@ -122,10 +121,13 @@ function parseBaseline(text: string): { thesis: ForecastReport['thesis']; calls:
 
   const calls: BaselineCall[] = [];
   for (const seg of text.split(/\n(?=\d+\.\s+\*\*)/)) {
-    const m = seg.match(/^\d+\.\s+\*\*([A-Z ]+?)\s*[—-]\s*(.+?)\*\*\s*([\s\S]*)/);
+    // Domain-agnostic: layer label = everything before the em/en-dash separator (so labels
+    // with internal hyphens/slashes/digits like EU/HIGH-RISK or ISO-42001 parse correctly).
+    // Accept any call label, not just the AI stack layers.
+    const m = seg.match(/^\d+\.\s+\*\*([^—–]+?)\s*[—–]\s*(.+?)\*\*\s*([\s\S]*)/);
     if (!m) continue;
     const layer = (m[1] ?? '').trim().toUpperCase();
-    if (!LAYERS.includes(layer)) continue;
+    if (!layer) continue;
     const headline = (m[2] ?? '').trim();
     const rest = (m[3] ?? '').replace(/\n+/g, ' ').replace(/\s+/g, ' ').trim();
     const conf = rest.match(/Confidence:\s*([A-Za-z-]+)/i);
@@ -158,8 +160,8 @@ function emptyReport(): ForecastReport {
   };
 }
 
-export function readForecastReport(opts: { limitCycles?: number } = {}): ForecastReport {
-  const dir = ledgerDir();
+export function readForecastReport(opts: { ledgerDir?: string; limitCycles?: number } = {}): ForecastReport {
+  const dir = opts.ledgerDir ?? ledgerDir();
   const fdir = join(dir, 'forecast');
   if (!existsSync(fdir)) return emptyReport();
 
@@ -195,7 +197,7 @@ export function readForecastReport(opts: { limitCycles?: number } = {}): Forecas
   // current = latest cycle, enriched with baseline context; ensure all layers present
   const latest = cycles[0]!;
   const latestByLayer = new Map(latest.calls.map((c) => [c.layer, c]));
-  const order = LAYERS.filter((l) => latestByLayer.has(l) || baseByLayer.has(l));
+  const order = [...new Set([...baseline.map((b) => b.layer), ...latest.calls.map((c) => c.layer)])];
   const current: CurrentCall[] = order.map((layer) => {
     const c = latestByLayer.get(layer);
     const b = baseByLayer.get(layer);
@@ -224,9 +226,10 @@ export function readForecastReport(opts: { limitCycles?: number } = {}): Forecas
     .flatMap((cy) => cy.calls.filter((c) => c.status === 'REVISED').map((c) => ({ ...c, iso: cy.iso })))
     .slice(0, 30);
 
-  // per-layer evolution (oldest→newest)
+  // per-layer evolution (oldest→newest) — over every layer actually seen
   const timeline: ForecastReport['timeline'] = {};
-  for (const layer of LAYERS) {
+  const allLayers = [...new Set([...baseline.map((b) => b.layer), ...cycles.flatMap((cy) => cy.calls.map((c) => c.layer))])];
+  for (const layer of allLayers) {
     const pts = cycles
       .filter((cy) => cy.calls.some((c) => c.layer === layer))
       .map((cy) => {
