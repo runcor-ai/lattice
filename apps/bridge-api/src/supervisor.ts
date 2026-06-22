@@ -560,6 +560,7 @@ export class Supervisor {
             allowedVerbs?: string[];
             timeoutMs?: number;
             outputMaxBytes?: number;
+            commandPrefix?: string;
           };
           if (typeof cfg.cwd !== 'string' || cfg.cwd.length === 0) {
             throw new Error(
@@ -573,6 +574,7 @@ export class Supervisor {
               ...(Array.isArray(cfg.allowedVerbs) ? { allowedVerbs: cfg.allowedVerbs } : {}),
               ...(typeof cfg.timeoutMs === 'number' ? { timeoutMs: cfg.timeoutMs } : {}),
               ...(typeof cfg.outputMaxBytes === 'number' ? { outputMaxBytes: cfg.outputMaxBytes } : {}),
+              ...(typeof cfg.commandPrefix === 'string' ? { commandPrefix: cfg.commandPrefix } : {}),
             }) as Capability<unknown, unknown>,
           );
           sawAction = true;
