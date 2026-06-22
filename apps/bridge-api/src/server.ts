@@ -304,9 +304,14 @@ export async function buildServer(opts: BuildServerOptions): Promise<BuiltServer
   // leading indicators (what would flip a call), revisions, and call evolution.
   app.get('/api/lattices/:id/forecasts', async (req, reply) => {
     const id = (req.params as { id: string }).id;
-    if (!supervisor.get(id)) return reply.code(404).send(errorBody('lattice_not_found', `no lattice ${id}`));
+    const rec = supervisor.get(id);
+    if (!rec) return reply.code(404).send(errorBody('lattice_not_found', `no lattice ${id}`));
+    // Resolve the ledger per lattice (keyed by stable spec name, so re-instantiation is safe).
+    // RUNCOR_FORECAST_LEDGERS = JSON {specName: ledgerDir}; unmapped names fall back to the default.
+    let perLatticeLedger: string | undefined;
+    try { perLatticeLedger = (JSON.parse(process.env.RUNCOR_FORECAST_LEDGERS ?? '{}') as Record<string, string>)[rec.name]; } catch { /* default */ }
     try {
-      return readForecastReport();
+      return readForecastReport(perLatticeLedger ? { ledgerDir: perLatticeLedger } : {});
     } catch (err) {
       return reply.code(500).send(errorBody('forecast_read_failed', err instanceof Error ? err.message : String(err)));
     }
