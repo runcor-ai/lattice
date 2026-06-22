@@ -191,7 +191,17 @@ export function readForecastReport(opts: { ledgerDir?: string; limitCycles?: num
   } catch { return emptyReport(); }
 
   if (cycles.length === 0) {
-    return { ...emptyReport(), available: baseline.length > 0, thesis, baseline };
+    // No adjudication cycles yet — the baseline IS the standing forecast. Surface its calls
+    // as `current` (standing HELD) so the page shows them rather than appearing empty.
+    const current: CurrentCall[] = baseline.map((b) => ({
+      layer: b.layer, status: 'HELD', confidence: b.confidence, claim: b.headline,
+      prior: null, signal: null, watching: null, whyNotYet: null, wouldFlip: null, killConditionMet: null, why: null,
+      headline: b.headline, prediction: b.prediction, killCondition: b.killCondition, baselineConfidence: b.confidence,
+    }));
+    return {
+      ...emptyReport(), available: baseline.length > 0, thesis, baseline, current,
+      counts: { cycles: 0, held: current.length, caveat: 0, revised: 0 },
+    };
   }
 
   // current = latest cycle, enriched with baseline context; ensure all layers present
