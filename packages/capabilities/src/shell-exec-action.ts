@@ -46,6 +46,14 @@ export interface ShellExecOptions {
   readonly allowedVerbs?: readonly string[];
   readonly timeoutMs?: number;
   readonly outputMaxBytes?: number;
+  /**
+   * When set, this capability is CONSTRAINED to a single fixed command: the actual command
+   * run is `${commandPrefix} <input>`, and the entity's input is treated as ARGUMENTS only —
+   * it cannot run any other command (no raw `node -e`, no chaining). Shell metacharacters in
+   * the input are stripped so the prefix can't be escaped. Use to lock e.g. web-fetch to
+   * `node fetch.mjs` so a fresh entity cannot improvise around the wrapper.
+   */
+  readonly commandPrefix?: string;
 }
 
 const DEFAULT_ALLOWLIST = [
@@ -179,9 +187,13 @@ export function makeShellExecAction(
   const timeoutMs = opts.timeoutMs ?? 30_000;
   const outputCap = opts.outputMaxBytes ?? 8_000;
 
+  const prefix = opts.commandPrefix?.trim();
+  const description = prefix
+    ? `Runs \`${prefix} <args>\` in ${jailedCwd}. You provide ONLY the arguments — e.g. "search <query>", "scrape <url>", "extract <url> :: <prompt>", "map <url>". You CANNOT run any other command (no node -e, no chaining); shell metacharacters are stripped. Input: { command: string } = the arguments. Output capped at ${outputCap} bytes/stream.`
+    : `Run a shell command in ${jailedCwd}. Allowed first-token verbs: ${[...allowed].sort().join(', ')}. Output capped at ${outputCap} bytes per stream. Input: { command: string }.`;
   return {
     name,
-    description: `Run a shell command in ${jailedCwd}. Allowed first-token verbs: ${[...allowed].sort().join(', ')}. Output capped at ${outputCap} bytes per stream. Input: { command: string }.`,
+    description,
     role: { sense: false, action: true },
     readOnly: false,
     destructive: false,
@@ -192,8 +204,15 @@ export function makeShellExecAction(
       if (!input || typeof input.command !== 'string' || input.command.trim().length === 0) {
         throw new Error('shell-exec: input.command (non-empty string) is required');
       }
+      let command = input.command.trim();
+      if (prefix) {
+        // Constrained tool: input is arguments to a fixed command. Strip shell chaining/redirect
+        // metacharacters so the prefix can't be escaped — the entity cannot run arbitrary commands.
+        const args = command.replace(/[;|`<>\r\n]/g, ' ').replace(/\s+/g, ' ').trim();
+        command = `${prefix} ${args}`;
+      }
       return await runShellCommand({
-        command: input.command,
+        command,
         cwd: jailedCwd,
         allowedVerbs: allowed,
         timeoutMs,
