@@ -70,6 +70,15 @@ function ledgerDir(): string {
   return process.env.RUNCOR_FORECAST_LEDGER ?? join(process.cwd(), '..', 'field-intel', 'ledger');
 }
 
+// Normalize a cycle's call label to the canonical baseline layer: strip "(CALL n)" suffixes
+// and fold abbreviations into the matching baseline layer (e.g. FUNDING → FUNDING SIGNAL),
+// so label drift across cycles doesn't spawn phantom/duplicate calls.
+function canonLayer(raw: string, baseLayers: string[]): string {
+  const s = raw.replace(/\s*\(.*?\)\s*$/, '').trim().toUpperCase();
+  if (baseLayers.includes(s)) return s;
+  return baseLayers.find((b) => b === s || b.startsWith(s) || s.startsWith(b)) ?? s;
+}
+
 function field(body: string, name: string): string | null {
   const m = body.match(new RegExp(`^${name}\\s*:\\s*(.+)$`, 'mi'));
   return m?.[1] ? m[1].trim() : null;
@@ -189,6 +198,12 @@ export function readForecastReport(opts: { ledgerDir?: string; limitCycles?: num
       .filter((c): c is ForecastCycle => !!c && c.calls.length > 0)
       .sort((a, b) => b.ts - a.ts);
   } catch { return emptyReport(); }
+
+  // Fold cycle label drift into the canonical baseline layers — the entity sometimes writes
+  // "FUNDING" or "FUNDING (CALL 6)" instead of "FUNDING SIGNAL"; without this each variant
+  // became a phantom/duplicate call (empty, no baseline behind it) in the display.
+  const baseLayers = baseline.map((b) => b.layer);
+  if (baseLayers.length) for (const cy of cycles) for (const c of cy.calls) c.layer = canonLayer(c.layer, baseLayers);
 
   if (cycles.length === 0) {
     // No adjudication cycles yet — the baseline IS the standing forecast. Surface its calls
