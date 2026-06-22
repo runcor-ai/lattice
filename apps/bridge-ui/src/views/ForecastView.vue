@@ -53,9 +53,10 @@ const r = computed(() => report.value);
         <RouterLink :to="`/lattice/${id}`" class="back">◂ {{ id }}</RouterLink>
         <h2>Standing Forecast</h2>
         <p class="sub muted">
-          Where durable value accrues across the agentic-AI stack
+          Dated, falsifiable calls grounded in cited signal
           <span v-if="r?.thesis.horizon"> · {{ r.thesis.horizon }}</span>
           <span v-if="r?.currentAsOf"> · as of {{ fmtDate(r.currentAsOf) }}</span>
+          <span v-else-if="r && r.counts.cycles === 0"> · baseline (no adjudication cycle yet)</span>
         </p>
       </div>
       <button class="refresh" @click="load">↻ Refresh</button>
