@@ -39,6 +39,8 @@ const delegateCold = computed(() => !c.value?.delegate);
 const firstBlock = computed(
   () => c.value?.substrate.find((s) => s.outcome !== 'pass') ?? null,
 );
+// Truncate so SVG text stays inside its box (SVG text neither wraps nor clips).
+const t = (s: string | null | undefined, n = 15) => { const v = s ?? '—'; return v.length > n ? v.slice(0, n - 1) + '…' : v; };
 </script>
 
 <template>
@@ -61,7 +63,7 @@ const firstBlock = computed(
             :fill="decideActive ? 'var(--bg-3)' : 'var(--bg-2)'"
             :stroke="decideActive ? 'var(--accent)' : 'var(--line)'" />
       <text x="300" y="100" class="label">DECIDE</text>
-      <text x="300" y="148" class="val action">{{ c?.decide.action ?? '—' }}</text>
+      <text x="300" y="148" class="val action">{{ t(c?.decide.action, 14) }}</text>
       <text x="300" y="170" class="sub">blocks={{ c?.decide.blocks ?? 0 }}</text>
     </g>
 
@@ -71,7 +73,7 @@ const firstBlock = computed(
             :fill="blocked ? 'rgba(248,113,113,0.10)' : 'var(--bg-2)'"
             :stroke="blocked ? 'var(--red)' : playback.phaseIndex >= 4 ? 'var(--accent)' : 'var(--line)'" />
       <text x="500" y="100" class="label">DISPATCH</text>
-      <text x="500" y="148" class="val action">{{ c?.dispatch.action ?? '—' }}</text>
+      <text x="500" y="148" class="val action">{{ t(c?.dispatch.action, 14) }}</text>
       <text x="500" y="170" class="sub" :class="{ bad: blocked }">
         {{ blocked ? 'BLOCKED · ' + c?.dispatch.blockedBy : c?.dispatch.result ?? '' }}
       </text>
@@ -94,7 +96,7 @@ const firstBlock = computed(
                 :fill="it.changedThisCycle ? 'rgba(132,204,139,0.14)' : 'var(--bg-2)'"
                 :stroke="it.state === 'passed' ? 'var(--green)' : it.changedThisCycle ? 'var(--green)' : 'var(--line)'" />
           <text :x="662" :y="96 + i * 30" class="item">
-            {{ it.state === 'passed' ? '▣' : '◻' }} {{ it.label.slice(0, 26) }}
+            {{ it.state === 'passed' ? '▣' : '◻' }} {{ t(it.label, 24) }}
           </text>
         </g>
       </template>
@@ -122,7 +124,7 @@ const firstBlock = computed(
             :fill="delegateCold ? 'var(--bg-2)' : 'rgba(125,211,252,0.12)'"
             :stroke="delegateCold ? 'var(--line)' : 'var(--accent)'" />
       <text x="540" y="304" class="val" :class="{ cold: delegateCold }">
-        {{ delegateCold ? 'COLD' : c?.delegate?.brief }}
+        {{ delegateCold ? 'COLD' : t(c?.delegate?.brief, 24) }}
       </text>
     </g>
 
@@ -154,7 +156,7 @@ const firstBlock = computed(
 }
 .val {
   fill: var(--text-0);
-  font-size: 14px;
+  font-size: 12px;
   text-anchor: middle;
   font-family: var(--font-mono);
 }

@@ -208,7 +208,10 @@ export function makeShellExecAction(
       if (prefix) {
         // Constrained tool: input is arguments to a fixed command. Strip shell chaining/redirect
         // metacharacters so the prefix can't be escaped — the entity cannot run arbitrary commands.
-        const args = command.replace(/[;|`<>\r\n]/g, ' ').replace(/\s+/g, ' ').trim();
+        // Includes & (cmd.exe command separator; &&/|| are covered since & and | are both stripped)
+        // alongside ; | ` < > newlines and the cmd grouping/escape chars ( ) ^ — containment is
+        // architectural: a chained "foo & node -e <anything>" must NOT reach a second command.
+        const args = command.replace(/[;|&`<>()^\r\n]/g, ' ').replace(/\s+/g, ' ').trim();
         command = `${prefix} ${args}`;
       }
       return await runShellCommand({
