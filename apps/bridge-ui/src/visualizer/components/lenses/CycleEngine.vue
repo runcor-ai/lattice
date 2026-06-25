@@ -45,6 +45,8 @@ const pulse = computed<Node>(() => {
 const c = computed(() => props.frame?.components ?? null);
 const blocked = computed(() => !!c.value?.dispatch.blockedBy);
 const actNode = computed<Node>(() => nodes.value[4] as Node); // act
+// Truncate so SVG text stays inside its shape (SVG text neither wraps nor clips).
+const fit = (s: string | null | undefined, n = 16) => { const v = s ?? '—'; return v.length > n ? v.slice(0, n - 1) + '…' : v; };
 </script>
 
 <template>
@@ -76,7 +78,7 @@ const actNode = computed<Node>(() => nodes.value[4] as Node); // act
             :stroke="blocked ? 'var(--red)' : 'var(--line-strong)'" stroke-width="2"
             @mouseenter="emit('hover', frame?.phases.find((p) => p.phase === 'decide')?.rowId ?? null)"
             @mouseleave="emit('hover', null)" />
-    <text :x="CX" :y="CY - 6" class="centre-action">{{ c?.decide.action ?? '—' }}</text>
+    <text :x="CX" :y="CY - 6" class="centre-action">{{ fit(c?.decide.action, 15) }}</text>
     <text :x="CX" :y="CY + 16" class="centre-sub" :class="{ bad: blocked }">
       {{ blocked ? 'blocked: ' + c?.dispatch.blockedBy : (c?.dispatch.result ?? '') }}
     </text>
@@ -119,7 +121,7 @@ const actNode = computed<Node>(() => nodes.value[4] as Node); // act
 }
 .centre-action {
   fill: var(--accent);
-  font-size: 16px;
+  font-size: 13px;
   text-anchor: middle;
   font-family: var(--font-mono);
 }

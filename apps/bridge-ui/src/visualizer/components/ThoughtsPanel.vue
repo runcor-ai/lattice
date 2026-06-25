@@ -244,6 +244,16 @@ watch(
           <div class="cot-label faint">⛓ chain of thought</div>
           <div class="cot-text">{{ currentCot }}</div>
         </div>
+
+        <!-- the complete raw output, collapsed below the summary -->
+        <details v-if="current.reasoning" class="block">
+          <summary>full output (raw reasoning)</summary>
+          <pre class="mono">{{ current.reasoning }}</pre>
+        </details>
+        <details v-if="current.prompt" class="block">
+          <summary>prompt sent to the model</summary>
+          <pre class="mono prompt">{{ current.prompt }}</pre>
+        </details>
       </div>
 
       <div class="sum-bar">

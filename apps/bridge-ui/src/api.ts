@@ -50,6 +50,8 @@ export interface ForecastCall {
   wouldFlip: string | null;
   killConditionMet: string | null;
   why: string | null;
+  forecastBy: string | null; // the predictive date — when this call is forecast to resolve
+  basis: string | null; // the current signal/evidence the forward prediction rests on
 }
 export interface CurrentCall extends ForecastCall {
   headline: string | null;
