@@ -1,5 +1,5 @@
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import type { Database } from 'better-sqlite3';
@@ -308,8 +308,16 @@ export async function buildServer(opts: BuildServerOptions): Promise<BuiltServer
     if (!rec) return reply.code(404).send(errorBody('lattice_not_found', `no lattice ${id}`));
     // Resolve the ledger per lattice (keyed by stable spec name, so re-instantiation is safe).
     // RUNCOR_FORECAST_LEDGERS = JSON {specName: ledgerDir}; unmapped names fall back to the default.
-    let perLatticeLedger: string | undefined;
-    try { perLatticeLedger = (JSON.parse(process.env.RUNCOR_FORECAST_LEDGERS ?? '{}') as Record<string, string>)[rec.name]; } catch { /* default */ }
+    // Map spec-name -> ledger dir from env, then OVERLAID by a file (ops/run/forecast-ledgers.json,
+    // beside the default ledger) so a new domain can be wired in with a safe bridge-only restart,
+    // without a full supervisor relaunch to change the env.
+    let ledgerMap: Record<string, string> = {};
+    try { ledgerMap = JSON.parse(process.env.RUNCOR_FORECAST_LEDGERS ?? '{}') as Record<string, string>; } catch { /* env unset */ }
+    try {
+      const base = process.env.RUNCOR_FORECAST_LEDGER;
+      if (base) ledgerMap = { ...ledgerMap, ...(JSON.parse(readFileSync(join(dirname(base), 'ops', 'run', 'forecast-ledgers.json'), 'utf8')) as Record<string, string>) };
+    } catch { /* no file → env only */ }
+    const perLatticeLedger = ledgerMap[rec.name];
     try {
       return readForecastReport(perLatticeLedger ? { ledgerDir: perLatticeLedger } : {});
     } catch (err) {

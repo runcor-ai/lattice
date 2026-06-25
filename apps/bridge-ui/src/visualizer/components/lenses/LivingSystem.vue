@@ -13,12 +13,14 @@ const emit = defineEmits<{
 const c = computed(() => props.frame?.components ?? null);
 const blocked = computed(() => !!c.value?.dispatch.blockedBy);
 
-// Bodies in the field (fixed loci; size/glow carry activity).
+const fit = (s: string | null | undefined, n = 14) => { const v = s ?? '—'; return v.length > n ? v.slice(0, n - 1) + '…' : v; };
+// Bodies in the field (fixed loci; size/glow carry activity, the sub-value below each
+// names what it's doing this cycle so the metaphor reads concretely).
 const bodies = computed(() => [
-  { key: 'senses', x: 180, y: 230, r: 26 + (c.value?.senses.count ?? 0) * 2, label: 'senses', on: props.playback.phaseIndex <= 1, color: 'var(--subconscious)' },
-  { key: 'decide', x: 400, y: 160, r: 34, label: c.value?.decide.action ?? 'decide', on: props.playback.phaseIndex >= 3, color: 'var(--accent)' },
-  { key: 'dispatch', x: 620, y: 230, r: 32, label: 'dispatch', on: props.playback.phaseIndex >= 4, color: blocked.value ? 'var(--red)' : 'var(--green)' },
-  { key: 'memory', x: 820, y: 170, r: 22 + (c.value?.memory.writes ?? 0) * 4, label: 'memory', on: props.playback.phaseIndex >= 6, color: 'var(--green)' },
+  { key: 'senses', x: 180, y: 230, r: 26 + (c.value?.senses.count ?? 0) * 2, label: 'senses', sub: `${c.value?.senses.count ?? 0} reads`, on: props.playback.phaseIndex <= 1, color: 'var(--subconscious)' },
+  { key: 'decide', x: 400, y: 160, r: 34, label: 'decide', sub: fit(c.value?.decide.action, 16), on: props.playback.phaseIndex >= 3, color: 'var(--accent)' },
+  { key: 'dispatch', x: 620, y: 230, r: 32, label: 'dispatch', sub: blocked.value ? 'blocked' : (c.value?.dispatch.result ?? 'idle'), on: props.playback.phaseIndex >= 4, color: blocked.value ? 'var(--red)' : 'var(--green)' },
+  { key: 'memory', x: 820, y: 170, r: 22 + (c.value?.memory.writes ?? 0) * 4, label: 'memory', sub: `+${c.value?.memory.writes ?? 0} written`, on: props.playback.phaseIndex >= 6, color: 'var(--green)' },
 ]);
 
 // A capped particle stream emitted by decide, colliding with dispatch — or
@@ -44,6 +46,9 @@ const firstBlock = computed(() => c.value?.substrate.find((s) => s.outcome !== '
 
 <template>
   <svg viewBox="0 0 1000 460" class="system" preserveAspectRatio="xMidYMid meet" @click="emit('select', 'thoughts')">
+    <!-- what this view shows -->
+    <text x="500" y="30" class="ls-caption">DECIDE emits toward DISPATCH · the substrate field repels when a law blocks · MEMORY accretes what's written</text>
+    <text x="500" y="48" class="ls-membrane-k">↑ gate membrane</text>
     <!-- membrane between decide and dispatch (gates) -->
     <line x1="500" y1="60" x2="500" y2="400" stroke="var(--line)" stroke-dasharray="2 6" />
 
@@ -61,7 +66,8 @@ const firstBlock = computed(() => c.value?.substrate.find((s) => s.outcome !== '
       <circle :cx="b.x" :cy="b.y" :r="b.r"
               :fill="b.on ? 'rgba(125,211,252,0.10)' : 'var(--bg-2)'"
               :stroke="b.color" :stroke-width="b.on ? 3 : 1.5" class="body" />
-      <text :x="b.x" :y="b.y + 4" class="body-label">{{ b.label.slice(0, 16) }}</text>
+      <text :x="b.x" :y="b.y + 4" class="body-label">{{ b.label }}</text>
+      <text :x="b.x" :y="b.y + b.r + 16" class="body-sub">{{ b.sub }}</text>
     </g>
 
     <!-- particles -->
@@ -70,6 +76,7 @@ const firstBlock = computed(() => c.value?.substrate.find((s) => s.outcome !== '
 
     <!-- accreting item bodies (memory/plan) -->
     <g v-if="c && c.items.length">
+      <text x="798" y="226" class="body-sub">plan items ({{ c.items.length }})</text>
       <circle v-for="(it, i) in c.items.slice(0, 10)" :key="it.id"
               :cx="820 + (i % 5) * 22 - 44" :cy="250 + Math.floor(i / 5) * 22" r="8"
               :fill="it.state === 'passed' ? 'var(--green)' : 'var(--bg-3)'"
@@ -95,6 +102,24 @@ const firstBlock = computed(() => c.value?.substrate.find((s) => s.outcome !== '
 .body-label {
   fill: var(--text-1);
   font-size: 12px;
+  text-anchor: middle;
+  font-family: var(--font-mono);
+}
+.body-sub {
+  fill: var(--text-2);
+  font-size: 11px;
+  text-anchor: middle;
+  font-family: var(--font-mono);
+}
+.ls-caption {
+  fill: var(--text-2);
+  font-size: 11px;
+  text-anchor: middle;
+  font-family: var(--font-mono);
+}
+.ls-membrane-k {
+  fill: var(--text-3);
+  font-size: 10px;
   text-anchor: middle;
   font-family: var(--font-mono);
 }

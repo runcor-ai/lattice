@@ -249,7 +249,10 @@ export function deriveFrames(rows: TraceRow[], opts: DeriveOpts = {}): CycleFram
           const rule = String(row.rule ?? '');
           if (rule === 'auto-attempt-deterministic' && typeof row.memory_id === 'string') {
             const id = row.memory_id;
-            const label = typeof row.now === 'string' ? row.now : id;
+            // `now` reads "item <id>… passed: <description>" — strip the id/status prefix
+            // so the item shows its real description, not the hash.
+            const rawNow = typeof row.now === 'string' ? row.now : '';
+            const label = rawNow.replace(/^item\s+\S+\s+(passed|failed)\s*:\s*/i, '').trim() || rawNow || id;
             const existing = items.get(id);
             if (existing) {
               existing.state = 'passed';
