@@ -589,12 +589,36 @@ export async function buildServer(opts: BuildServerOptions): Promise<BuiltServer
       source: 'system',
     });
     if (parsed.data.items) {
-      for (const item of parsed.data.items) {
-        jobs.addItem(job.id, {
-          description: item.description,
-          spec: safeJson(item.completion_check) as { hooks: { name: string }[] },
-          source: 'operator',
-        });
+      // Auto-chain operator items: each operator item is blocked_by the
+      // previously-inserted item on this job (the plan-gate for the first,
+      // each prior operator item for the rest). Required because
+      // JobsService.addItem refuses to insert a source='operator' item with
+      // blocked_by:null when non-operator items already exist (the plan-gate
+      // is a non-operator item the bridge just inserted above). Without this
+      // chaining, the bridge would 409 on its own first operator item.
+      // Operators can override by setting blocked_by explicitly in the body
+      // schema if they need a different topology — but the default of "block
+      // each operator item on the most-recent prior item" is the right one
+      // for the typical "rolling done-attestation closes after everything
+      // else" pattern.
+      const allItems = jobs.checklist.items(job.id);
+      let prevId: string | null = allItems[allItems.length - 1]?.id ?? null;
+      try {
+        for (const item of parsed.data.items) {
+          const inserted = jobs.addItem(job.id, {
+            description: item.description,
+            spec: safeJson(item.completion_check) as { hooks: { name: string }[] },
+            source: 'operator',
+            blocked_by: prevId,
+          });
+          prevId = inserted.id;
+        }
+      } catch (err) {
+        const { OperatorItemValidationError } = await import('@runcor/jobs');
+        if (err instanceof OperatorItemValidationError) {
+          return reply.code(409).send(errorBody(err.code, err.message));
+        }
+        throw err;
       }
     }
     // Item 9 — if the lattice auto-paused for lack of open jobs, the new
@@ -632,6 +656,95 @@ export async function buildServer(opts: BuildServerOptions): Promise<BuiltServer
       return reply.code(status).send(errorBody(result.code, result.reason));
     }
     return reply.code(201).send({ item_id: result.item.id });
+  });
+
+  /* --------------- Operator attestation --------------- */
+  /**
+   * POST /api/lattices/:id/items/:item_id/attest
+   *
+   * The operator-side closer for items with source='operator'. This is the
+   * only caller in the codebase that passes mode='operator' to JobsService
+   * .attemptCheck — every other path (close-job-item, auto-sweep) is jailed
+   * out by the entry-layer refusal in service.ts. Combined with the
+   * source-immutability proof (jobs/src/source-immutability.test.ts), an
+   * operator-source item can be closed ONLY by a deliberate operator HTTP
+   * call to this endpoint. The architect's tool surface provides no path
+   * to mint a source='operator' item nor to mutate one, and no manifest
+   * action sets mode='operator'.
+   *
+   * The gate hook is still evaluated when this endpoint runs — so e.g. a
+   * file_exists gate must still be met on disk. If the operator hits
+   * /attest before the gate is satisfied, they get 409 with the hook's
+   * reason. The endpoint is not a force-pass; it is the only mode in
+   * which the gate is allowed to evaluate.
+   */
+  app.post('/api/lattices/:id/items/:item_id/attest', async (req, reply) => {
+    const { id, item_id } = req.params as { id: string; item_id: string };
+    const r = supervisor.get(id);
+    if (!r) return reply.code(404).send(errorBody('lattice_not_found', `no lattice ${id}`));
+    const note = (req.body && typeof (req.body as { note?: unknown }).note === 'string')
+      ? (req.body as { note: string }).note
+      : '';
+    const { JobsService } = await import('@runcor/jobs');
+    const jobs = new JobsService(r.lattice.dbHandle());
+    const item = jobs.checklist.getItem(item_id);
+    if (!item) return reply.code(404).send(errorBody('item_not_found', `no item ${item_id}`));
+    if (item.source !== 'operator') {
+      return reply
+        .code(409)
+        .send(errorBody(
+          'not_an_operator_item',
+          `item ${item_id} has source='${item.source}' — only source='operator' items are attestable`,
+        ));
+    }
+    if (item.state === 'passed') {
+      return reply.code(200).send({ item_id, already: 'passed', passed_at_cycle: item.passed_at_cycle });
+    }
+    // Hard-reject items whose gate is file_exists (or any non-operator_attested
+    // hook). The whole run-3 bug was a file standing in for an operator
+    // judgment; refusing here makes the misconfiguration unrepresentable at
+    // the endpoint boundary. Operators authoring a job MUST use the
+    // operator_attested hook for their terminal attestation item.
+    try {
+      const spec = JSON.parse(item.completion_check) as { hooks?: Array<{ name?: string }> };
+      const hookNames = (spec.hooks ?? []).map((h) => h.name).filter(Boolean);
+      if (hookNames.length === 0 || !hookNames.every((n) => n === 'operator_attested')) {
+        return reply.code(409).send(errorBody(
+          'attestation_invalid_gate',
+          `operator items must use the operator_attested hook only — found: ${hookNames.join(',') || '(empty)'}. A file_exists gate (or any other hook) lets a file or shell verb stand in for an operator judgment; refused.`,
+        ));
+      }
+    } catch {
+      return reply.code(409).send(errorBody('attestation_invalid_gate', 'item completion_check is unparseable'));
+    }
+    // Upsert the operator_attestation row BEFORE running attemptCheck so the
+    // operator_attested hook sees it. The row is the ONLY satisfier — no
+    // file at any path satisfies the gate.
+    const db = r.lattice.dbHandle() as unknown as { prepare: (s: string) => { run: (...args: unknown[]) => unknown } };
+    db.prepare(
+      `INSERT INTO operator_attestation (item_id, lattice_id, attested_at_cycle, attested_at_ms, note)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(item_id) DO UPDATE SET attested_at_cycle = excluded.attested_at_cycle, attested_at_ms = excluded.attested_at_ms, note = excluded.note`,
+    ).run(item_id, id, r.lattice.completedCycle, Date.now(), note);
+    const result = await jobs.attemptCheck(item_id, {
+      cycle: r.lattice.completedCycle,
+      mode: 'operator',
+    });
+    r.lattice.trace.write({
+      kind: 'operator',
+      cycle: r.lattice.completedCycle,
+      at_ms: Date.now(),
+      action: 'attest',
+      detail: `item=${item_id} outcome=${result.outcome}${note ? ` note=${note.slice(0, 200)}` : ''}`,
+    });
+    if (result.outcome === 'passed') {
+      return reply.code(200).send({ item_id, outcome: 'passed', passed_at_cycle: result.item.passed_at_cycle });
+    }
+    // Gate didn't pass even under operator mode — the deliverable isn't on
+    // disk yet, the blocker chain isn't clear, or some other hook says no.
+    return reply
+      .code(409)
+      .send(errorBody('attestation_failed', `outcome=${result.outcome}: ${result.reason ?? '(no reason)'}`));
   });
 
   /* --------------- Escalations --------------- */

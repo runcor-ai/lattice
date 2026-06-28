@@ -52,8 +52,7 @@ rejects empty / placeholder paths with a clear error. That's
 intentional — running this role without operator-configured paths
 would be a security boundary violation.
 
-See `docs/worked-example-run/` in the parent repo for a concrete example
-instantiation script (`resume-run-7.mjs` / `instantiate-run-7.mjs`).
+See the repository quickstart for an example instantiation script.
 
 ## Sandboxing
 

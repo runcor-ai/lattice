@@ -13,6 +13,10 @@ export {
 export {
   driftReview,
   defaultDetector,
+  AGE_OUT_HANDLERS,
+  OPEN_QUESTION_AGE_OUT,
+  WATCHDOG_KINDS,
+  WATCHDOG_TIER3_KINDS,
   type DriftDetector,
   type DriftDetectorInputs,
   type DriftFinding,

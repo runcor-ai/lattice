@@ -182,6 +182,33 @@ export async function act(ctx: CycleContext, prev: DecideOutput): Promise<ActOut
 
   switch (out.result) {
     case 'ok':
+      // close-job-item returns out.data with outcome ∈ { 'passed', 'blocked',
+      // 'failed_iterating', 'judgement_required', 'iteration_cap_exceeded' }.
+      // A non-'passed' outcome means the close DID NOT transition the item —
+      // typically because attemptCheck found an unsatisfied blocked_by link
+      // (see jobs/src/service.ts:103). Without this branch the capability's
+      // out.result='ok' lets the cycle record actResult='ok' and the next
+      // cycle's recent-actions memory tells the architect "close-job-item:
+      // ok" — masking the silent stall observed in abc-architect-run-2 where
+      // the architect picked transitively-blocked items 5 cycles in a row.
+      // Downgrading to 'failed' + actFailedReason routes the reason through
+      // the existing failed-shape so the write-phase memory clock surfaces
+      // it next cycle and the architect can reroute. Narrowly scoped to
+      // close-job-item: other actions don't carry passed/blocked semantics.
+      if (
+        prev.chosenAction === 'close-job-item' &&
+        out.data &&
+        typeof (out.data as { outcome?: unknown }).outcome === 'string' &&
+        (out.data as { outcome: string }).outcome !== 'passed'
+      ) {
+        const d = out.data as { itemId: string; outcome: string; reason?: string };
+        return {
+          ...prev,
+          actResult: 'failed',
+          actFailedReason: `close-job-item ${d.itemId.slice(0, 8)} → ${d.outcome}: ${d.reason ?? '(no reason)'}`,
+          actData: out.data,
+        };
+      }
       // Record only dispatched (ok) actions — this is what makes idle/
       // failed/denied naturally exempt from the Persistence law.
       if (prev.chosenAction) recordAction(db, prev.chosenAction, inputHash, ctx.cycle);

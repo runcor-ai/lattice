@@ -11,7 +11,7 @@ import type {
  * Without this, the lattice has no way to progress through a multi-item
  * job: every cycle would see the same open items in its reality slice
  * and might rewrite the same deliverable indefinitely (the dir-loop
- * failure mode observed in the first worked example run). With this, after
+ * failure mode observed in an early production run). With this, after
  * writing the deliverable, the lattice invokes `close-job-item` with
  * the item's id; the deterministic completion hooks fire; if they pass
  * the item is marked passed and drops from the open list on the next
@@ -32,7 +32,15 @@ export interface CloseJobItemInput {
 
 export interface CloseJobItemResult {
   readonly itemId: string;
-  readonly outcome: 'passed' | 'failed_iterating' | 'judgement_required' | 'iteration_cap_exceeded' | 'blocked';
+  /**
+   * `awaiting_operator` — the targeted item has source='operator', closeable
+   * only via POST /api/lattices/:id/items/:item_id/attest. The architect's
+   * close-job-item attempt is structurally refused at attemptCheck before
+   * any hook runs (see jobs/src/service.ts). The runtime's act phase
+   * surfaces this through actFailedReason so the architect's next-cycle
+   * memory carries the reason and it can reroute.
+   */
+  readonly outcome: 'passed' | 'failed_iterating' | 'judgement_required' | 'iteration_cap_exceeded' | 'blocked' | 'awaiting_operator';
   readonly reason?: string;
 }
 

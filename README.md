@@ -75,21 +75,14 @@ For the full operator walkthrough see
 
 ---
 
-## A worked example — the worked example migration
+## A worked example
 
-[`docs/worked-example-run/`](docs/worked-example-run/) is a complete record
-of one lattice analysing and porting a real codebase
-(reference-web-app — React + Supabase Edge Functions, ~150
-features) to a local-only Vue 3 + Node + SQLite stack. **16 of
-16 items closed in 74 cycles**, end-to-end, over a wall-clock
-~3h 50m. The folder contains:
-
-- The five required analysis deliverables ([features](docs/worked-example-run/01-features.md), [vulnerabilities](docs/worked-example-run/02-vulnerabilities.md), [migration](docs/worked-example-run/03-migration.md), [plan](docs/worked-example-run/04-plan.md), [privacy_controls](docs/worked-example-run/05-privacy_controls.md)) — ~150 KB of structured engineering analysis
-- A scorecard ([_run-7-scorecard.md](docs/worked-example-run/_run-7-scorecard.md)) showing what landed, what was excluded, and what was verified live (server boot logs, endpoint responses, SQLite row counts)
-- The lattice's own **unprompted** self-audit docs (the meta files prefixed `_run-*`)
-- A seven-run lesson summary documenting the failure modes I caught and the systemic fixes I shipped in response — every fix is fundamental to the lattice runtime, none is task-specific
-
-It's the best demonstration in the repo of what the lattice does.
+The lattice has been run end-to-end on a real engineering task —
+autonomously analysing a production web application (~150 features) and
+porting it to a local-only Vue 3 + Node + SQLite stack: **16 of 16
+deliverables closed in 74 cycles**, unattended, over a ~3h 50m
+wall-clock run. Every systemic issue that run surfaced was fixed in the
+lattice runtime itself, never the task — so the improvements compounded.
 
 ---
 
@@ -132,7 +125,6 @@ prebuilt/           # Role bundles (identity seed + starting knowledge + tool ma
 └── software-engineer/   # See note below — operator must override tool paths at instantiation
 
 docs/
-├── worked-example-run/  # End-to-end demonstration: lattice ported a React/Supabase app to Vue/Node/SQLite
 ├── operations.md   # Day-to-day operator guide (backups, hung lattices, dials)
 ├── extending.md    # Adding new capabilities / backends / snapshot destinations / prebuilt roles
 ├── security-model.md  # Single-tenant local-only justification + threat model
@@ -314,8 +306,8 @@ With the skill installed, the operator-Claude interaction is just
 
 The build progressed through 15 vertical slices to reach the
 shipping baseline; see the constitution + plan documents for the
-full ledger. Subsequent work (post-`docs/worked-example-run/`) added
-engineering-grade deterministic primitives:
+full ledger. Subsequent work added engineering-grade
+deterministic primitives:
 
 - `file_exists` completion-check hook
 - The subconscious sweep's per-cycle deterministic auto-attempt
@@ -332,9 +324,7 @@ engineering-grade deterministic primitives:
   "memories-available-but-not-referenced" loop
 
 Every fix above is fundamental to the lattice runtime, never
-task-specific. The seven-run history in
-[`docs/worked-example-run/README.md`](docs/worked-example-run/README.md)
-walks through what was caught and what was changed.
+task-specific.
 
 A subsequent change set (the *lattice-changes* spec; grounding +
 follow-ups in
@@ -388,7 +378,6 @@ the dispatch layer, not advice in a prompt.
 | [`docs/extending.md`](docs/extending.md) | Adding new capabilities / backends / snapshot destinations / prebuilt roles |
 | [`docs/security-model.md`](docs/security-model.md) | Single-tenant local-only justification + threat model |
 | [`docs/r-plus-plus.md`](docs/r-plus-plus.md) | Developer's guide to R++ |
-| [`docs/worked-example-run/`](docs/worked-example-run/) | Concrete end-to-end demonstration |
 | [`skills/runcor-lattice/SKILL.md`](skills/runcor-lattice/SKILL.md) | Operator skill (Anthropic skill format) |
 
 ---
@@ -458,5 +447,5 @@ plan → tasks → analyze → implement. The full audit trail lives in
 
 Open an issue or PR. Two things to keep in mind:
 
-1. **Every fix should improve any lattice on any task with the same failure mode.** Task-specific patches don't land here — they're worked at the operator-of-a-specific-lattice level. The build records (`docs/worked-example-run/_run-1-5-analysis.md`) show this discipline in practice.
+1. **Every fix should improve any lattice on any task with the same failure mode.** Task-specific patches don't land here — they're worked at the operator-of-a-specific-lattice level.
 2. **Constitution is non-negotiable scope.** A change that violates one of the 14 principles needs an explicit constitution amendment (a separate PR before the implementation PR).

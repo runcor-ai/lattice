@@ -207,7 +207,7 @@ export class Lattice {
               // Evaluate the item's cheap deterministic gate live against the
               // filesystem so the reality slice carries ground truth that a
               // drifted situation summary cannot override.
-              let gate: { passed: boolean; reason: string; deferred: boolean };
+              let gate: ReturnType<typeof summarizeGate>;
               try {
                 gate = summarizeGate(parseSpec(it.completion_check), checkRegistry, it, cycle);
               } catch (err) {
@@ -215,13 +215,30 @@ export class Lattice {
                   passed: false,
                   reason: `gate spec unreadable: ${err instanceof Error ? err.message : String(err)}`,
                   deferred: false,
+                  kind: 'unknown_hook',
                 };
+              }
+              // Resolve blocked_by → blocker's ordinal when the blocker is
+              // still open, so the ground prompt can annotate the item with
+              // "(blocked by ord=K open)". A blocker that is already passed
+              // is no impediment and isn't surfaced. Without this annotation
+              // the architect cannot distinguish currently-closeable items
+              // from items whose close would silently no-op via attemptCheck's
+              // outcome:'blocked' shortcut (jobs/src/service.ts:103).
+              let blockedBy: { ordinal: number } | null = null;
+              if (it.blocked_by) {
+                const blocker = jobs.checklist.getItem(it.blocked_by);
+                if (blocker && blocker.state !== 'passed') {
+                  blockedBy = { ordinal: blocker.ordinal };
+                }
               }
               return {
                 id: it.id,
                 description: it.description,
                 iteration_count: it.iteration_count,
                 gate,
+                blockedBy,
+                source: it.source,
               };
             }),
       };

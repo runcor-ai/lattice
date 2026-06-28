@@ -240,7 +240,10 @@ describe('#17 — job-close ignores the entity\'s self-added plan_step/lattice_a
     // entity decomposes the work into its own checklist — these must NOT block close
     svc.addItem(job.id, { description: 'plan: PROTOCOLS sub-analysis', spec: spec('always_fail'), source: 'plan_step' });
     svc.addItem(job.id, { description: 'plan: close item X then Y', spec: spec('always_fail'), source: 'plan_step' });
-    await svc.attemptCheck(deliverable.id, { cycle: 1 }); // operator deliverable passes
+    // mode='operator' simulates the bridge's POST /items/:id/attest — the
+    // only legitimate closer for source='operator' items under the
+    // attestation lock (service.ts entry-layer refusal).
+    await svc.attemptCheck(deliverable.id, { cycle: 1, mode: 'operator' });
     const r = svc.close({ jobId: job.id, cycle: 2, at_ms: 2, autonomy: 'high' });
     expect(r.result).toBe('closed');
     if (r.result === 'closed') expect(r.mode).toBe('full'); // plan_steps ignored, not counted as deferred
@@ -261,7 +264,7 @@ describe('#17 — job-close ignores the entity\'s self-added plan_step/lattice_a
     const job = svc.openJob({ title: 'forecast', source: 'operator', why: 'y', cycle: 1, at_ms: 1 });
     const op = svc.addItem(job.id, { description: 'deliverable', spec: spec('always_pass'), source: 'operator' });
     svc.addItem(job.id, { description: 'self-appended extra', spec: spec('always_fail'), source: 'lattice_appended' });
-    await svc.attemptCheck(op.id, { cycle: 1 });
+    await svc.attemptCheck(op.id, { cycle: 1, mode: 'operator' });
     const r = svc.close({ jobId: job.id, cycle: 2, at_ms: 2, autonomy: 'high' });
     expect(r.result).toBe('closed');
   });

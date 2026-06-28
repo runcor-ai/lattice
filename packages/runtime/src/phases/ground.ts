@@ -2,7 +2,9 @@ import type { Capability } from '@runcor/capabilities';
 import { wrap } from '@runcor/substrate';
 
 import { NO_PROGRESS_THRESHOLD, readNoProgressCycles } from '../no-progress.js';
+import { renderOpenQuestions } from '../open-questions.js';
 import type { RuntimeMemoryAdapter } from '../sqlite-memory.js';
+import { renderWatchdogCorrections } from '../watchdog-corrections.js';
 import type {
   CycleContext,
   GroundOutput,
@@ -23,6 +25,30 @@ import type {
  */
 const RECENT_ACTIONS_LIMIT = 24;
 const RECENT_ACTION_MAX_BYTES = 280;
+
+/**
+ * Caps for the watchdog-corrections recall section (three-tier watchdog Step 1).
+ *
+ * TODO(dial): make these dial-able via the operator review-cadence dial when
+ * the re-run shows whether 6/1500 is too few (corrections dropped before the
+ * lattice acts) or too many (drowning the prompt budget). Hardcoded for v1 to
+ * keep the recall wire focused — turning these into true dials adds a dial
+ * schema entry + a per-cycle read path, which is more than a few lines.
+ */
+const WATCHDOG_CORRECTIONS_LIMIT = 6;
+const WATCHDOG_CORRECTIONS_BYTE_BUDGET = 1500;
+
+/**
+ * Caps for the Tier-3 open-questions recall section (Step 4).
+ *
+ * Denser per row than corrections — each row renders four lines (header
+ * + lattice position + watchdog position + no-object reason). Tighter
+ * count cap to keep the per-cycle prompt bounded; equal byte budget
+ * because each entry is structurally longer. TODO(dial): same dial-ability
+ * note as corrections.
+ */
+const OPEN_QUESTIONS_LIMIT = 4;
+const OPEN_QUESTIONS_BYTE_BUDGET = 1500;
 
 /**
  * Caps for surfacing sensed DATA in the reality slice (not just status). Per-sense
@@ -83,11 +109,34 @@ export async function ground(
 
   // Item 15 — when the work has stalled, lead the reality slice with a
   // high-salience posture-change demand so the decide call cannot miss it.
-  const noProgress = readNoProgressCycles((ctx.memory as RuntimeMemoryAdapter).dbHandle());
+  const db = (ctx.memory as RuntimeMemoryAdapter).dbHandle();
+  const noProgress = readNoProgressCycles(db);
   const noProgressBlock =
     noProgress >= NO_PROGRESS_THRESHOLD
       ? `NO PROGRESS — ${noProgress} cycles with no item closing or gate clearing. The current approach is NOT working. Before any more fetching, reading, or inventorying, STOP and re-examine YOUR OWN state and assumptions: Are you misusing a tool (a path that keeps failing? paths are relative to each tool's stated root — do not re-prepend the root, e.g. use "center.md", not "ledger/center.md")? Repeating an action that already failed? Ignoring data you ALREADY hold (your senses this cycle already surface the corpus content — reason over it instead of re-fetching)? And do NOT loop to perfect or verify one source: if a fact cannot be confirmed now (dead link, missing source), COMMIT your best integrated judgment and FLAG that claim as unverified — a sound analyst writes "this figure is unverified, flagged" and produces the deliverable, rather than chasing a single source. Produce the deliverable from what you already have.`
       : '';
+
+  // Three-tier watchdog Step 1 — render unresolved watchdog corrections from
+  // the slow-clock drift review. Object-cited; the citation does the
+  // persuading. Tier-3 surfaces (open questions) will live in a separate table
+  // and render under a different header (Step 4) — that physical separation,
+  // not a tag, is what keeps a question from ever being rendered as a fact.
+  const correctionsBlock = renderWatchdogCorrections(
+    db,
+    WATCHDOG_CORRECTIONS_LIMIT,
+    WATCHDOG_CORRECTIONS_BYTE_BUDGET,
+  );
+
+  // Tier-3 open-questions section — physically separate selector reading a
+  // different table than the corrections section. Distinct header marks the
+  // no-authority caveat so the lattice's frame for these is "deliberate,"
+  // not "accept as fact." Both sections render side by side; the wording is
+  // the only signal.
+  const openQuestionsBlock = renderOpenQuestions(
+    db,
+    OPEN_QUESTIONS_LIMIT,
+    OPEN_QUESTIONS_BYTE_BUDGET,
+  );
 
   const groundedPrompt = wrap({
     cycle: ctx.cycle,
@@ -97,6 +146,8 @@ export async function ground(
       noProgressBlock,
       `senses:\n${senseSummary || '(none enabled)'}`,
       contextBlock,
+      correctionsBlock,
+      openQuestionsBlock,
       jobBodyBlock,
       tasksBlock,
     ]
@@ -119,7 +170,7 @@ export async function ground(
       'TARGET { output: "close-job-item" }',
       'TOKENS {',
       '  itemId: "the-item-uuid-from-the-open-tasks-list"',
-      '  why: "private-data/out/features.md written this cycle with full citations"',
+      '  why: "output/features.md written this cycle with full citations"',
       '}',
       'BEHAVIOR Decide {',
       '  Item 3.1 deliverable produced; close so the next cycle progresses to 3.2.',
@@ -261,7 +312,7 @@ function renderJobBody(tasks: TasksView | undefined): string {
   return `current job (Layer 3 — "${active.title}"):\n${active.body.trim()}`;
 }
 
-function renderTasksBlock(tasks: TasksView | undefined): string {
+export function renderTasksBlock(tasks: TasksView | undefined): string {
   if (!tasks) return '';
   const jobs = tasks.listOpenJobs();
   if (jobs.length === 0) return 'open tasks: (none)';
@@ -276,20 +327,63 @@ function renderTasksBlock(tasks: TasksView | undefined): string {
     } else {
       for (const it of items) {
         const iter = it.iteration_count > 0 ? ` (iter=${it.iteration_count})` : '';
-        // Item id is shown so the lattice can copy it verbatim into
-        // close-job-item's TOKENS block once the deliverable exists.
-        lines.push(`    [ ] id=${it.id} — ${it.description}${iter}`);
-        // Ground-truth gate verdict, evaluated against disk this cycle. A
-        // passing gate on an item the summary calls "blocked" — or the exact
-        // missing condition on one the summary calls "done" — is the signal
-        // that breaks a poisoned-summary drift loop.
+        const blk = it.blockedBy ? ` (blocked by ord=${it.blockedBy.ordinal} open)` : '';
+        const ops = it.source === 'operator' ? ' (operator-attestation — closeable only by operator endpoint)' : '';
+        lines.push(`    [ ] id=${it.id} — ${it.description}${iter}${blk}${ops}`);
+        // Closeability signal — the line under each open item that tells the
+        // architect what's REAL about this item's gate, regardless of hook
+        // tier. The matrix:
+        //   - blocked → no gate line (blocker annotation on the line above is the signal)
+        //   - source='operator' → "awaiting operator attestation" (never "close this", even when all
+        //     siblings passed — the architect MUST NOT be lured by a near-ready operator item)
+        //   - cheap_pass → "gate OK — close this item" (unchanged from prior behaviour)
+        //   - cheap_pass_costly_pending → "gate OK — cheap satisfied; close will run the costly <hook>"
+        //   - cheap_fail → "gate NOT MET — <specific reason>" (unchanged)
+        //   - costly_only step_acknowledged → "ready — acknowledgement gate; close with justification"
+        //   - costly_only operator_attested (defence-in-depth — should be unreachable
+        //     since source=='operator' branch fires first, but handled here too)
+        //   - costly_only command_exits_zero/http_status_is → "costly — close will run <hook>"
+        //   - unknown_hook → "gate UNKNOWN — <reason>"
+        // Reserved: "NOT MET" is for cheap hooks that actually failed. A
+        // costly-only item never renders NOT MET. The pre-fix renderer
+        // emitted "gate NOT MET — costly gate — verified only on explicit
+        // close" for costly-only items, which actively misled the
+        // architect (run-3 phase-3 stall: ord=8 reachable + step_acknowledged
+        // rendered NOT MET, ord=1 file_exists-on-stale-file rendered "close
+        // this" — six wrong picks before the no-progress circuit-breaker fired).
         const g = it.gate;
-        if (g) {
-          lines.push(
-            g.passed
-              ? `         gate OK — ${g.reason}`
-              : `         gate NOT MET — ${g.reason}`,
-          );
+        if (it.blockedBy) {
+          // Blocker annotation already on the item line above; suppressing
+          // the gate line keeps the prompt compact and the signal singular.
+        } else if (it.source === 'operator') {
+          lines.push(`         gate: awaiting operator attestation — closeable only by POST /api/lattices/:id/items/:item_id/attest, not by architect`);
+        } else if (g) {
+          switch (g.kind) {
+            case 'cheap_pass':
+              lines.push(`         gate OK — ${g.reason}`);
+              break;
+            case 'cheap_pass_costly_pending':
+              lines.push(`         gate OK — cheap checks satisfied; close-job-item will run the costly ${g.costlyHook ?? 'gate'} check`);
+              break;
+            case 'cheap_fail':
+              lines.push(`         gate NOT MET — ${g.reason}`);
+              break;
+            case 'costly_only':
+              if (g.costlyHook === 'step_acknowledged') {
+                lines.push(`         gate: ready — acknowledgement gate; close-job-item with a one-line justification to close`);
+              } else if (g.costlyHook === 'operator_attested') {
+                // Defence-in-depth — source='operator' branch above already handled
+                // the typical case. This catches the rare non-operator item that
+                // somehow declared an operator_attested gate.
+                lines.push(`         gate: awaiting operator attestation — closeable only by POST /api/lattices/:id/items/:item_id/attest, not by architect`);
+              } else {
+                lines.push(`         gate: costly — close-job-item will run ${g.costlyHook ?? 'the costly gate'}`);
+              }
+              break;
+            case 'unknown_hook':
+              lines.push(`         gate UNKNOWN — ${g.reason}`);
+              break;
+          }
         }
       }
     }

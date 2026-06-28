@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, statSync } from 'node:fs';
 
-import { runShellCommand } from '@runcor/capabilities';
+import { REGISTERED_HOOK_NAMES, runShellCommand } from '@runcor/capabilities';
 
 import type { CheckOutcome, CompletionCheckSpec, DeterministicHook, Item } from './types.js';
 
@@ -31,6 +31,15 @@ export interface HookFn {
 export interface HookContext {
   readonly item: Item;
   readonly cycle: number;
+  /**
+   * Optional sqlite handle. Most hooks ignore this; the `operator_attested`
+   * hook requires it to check the operator_attestation table and to verify
+   * the all-other-items-passed completeness condition. attemptCheck (in
+   * service.ts) supplies it; callers running runDeterministicHooks outside
+   * a JobsService context may omit it, in which case operator_attested
+   * fails with an explanatory reason.
+   */
+  readonly db?: import('better-sqlite3').Database;
 }
 
 export interface HookRegistration {
@@ -55,6 +64,11 @@ export class CheckRegistry {
 
   get(name: string): HookRegistration | undefined {
     return this.hooks.get(name);
+  }
+
+  /** Iterator of registered hook names — used by the drift guard below. */
+  names(): IterableIterator<string> {
+    return this.hooks.keys();
   }
 }
 
@@ -200,6 +214,73 @@ export function builtinRegistry(): CheckRegistry {
         }
       },
       { costly: true },
+    )
+    /**
+     * `operator_attested` — TERMINAL. The only satisfier for a true
+     * operator sign-off. Bound to the lattice's own state, not to any
+     * file on disk:
+     *
+     *   1. A row must exist in `operator_attestation` for `ctx.item.id`.
+     *      The only writer is the bridge endpoint
+     *      `POST /api/lattices/:id/items/:item_id/attest`. The architect
+     *      tool surface has no manifest action that inserts here
+     *      (verified by jobs/source-immutability.test.ts's table-write
+     *      scan). No file at any path can satisfy this hook — it does
+     *      not read the filesystem.
+     *
+     *   2. Every OTHER item on the same job must be in state='passed'.
+     *      Open items mean the work is incomplete; deferred items
+     *      ALSO mean the work is incomplete. A deferred item is
+     *      unfinished work that the lattice paused, not work that has
+     *      been excluded from the contract. Without the deferred-check,
+     *      run-3's failure mode would survive in a new shape: the
+     *      no-progress circuit-breaker defers everything, then the
+     *      operator endpoint flips the attestation, and a partial job
+     *      gets a "complete" sign-off. Refusing on deferred items
+     *      closes that laundering path.
+     *
+     * Cosly:true — never auto-passes during the every-cycle sweep; only
+     * evaluates on an explicit close attempt (mode='operator' from the
+     * bridge endpoint).
+     */
+    .register(
+      'operator_attested',
+      (_args, ctx) => {
+        if (!ctx.db) {
+          return { passed: false, reason: 'operator_attested: db handle unavailable (hook requires JobsService.attemptCheck context)' };
+        }
+        const attest = ctx.db
+          .prepare('SELECT item_id FROM operator_attestation WHERE item_id = ?')
+          .get(ctx.item.id) as { item_id: string } | undefined;
+        if (!attest) {
+          return { passed: false, reason: 'operator_attested: no attestation recorded — operator has not called POST /attest' };
+        }
+        const siblings = ctx.db
+          .prepare(
+            `SELECT state, COUNT(*) AS n
+             FROM plan_item
+             WHERE job_id = ? AND id != ?
+             GROUP BY state`,
+          )
+          .all(ctx.item.job_id, ctx.item.id) as Array<{ state: string; n: number }>;
+        const counts = { open: 0, deferred: 0, passed: 0 };
+        for (const r of siblings) {
+          if (r.state === 'open') counts.open = r.n;
+          else if (r.state === 'deferred') counts.deferred = r.n;
+          else if (r.state === 'passed') counts.passed = r.n;
+        }
+        if (counts.open > 0 || counts.deferred > 0) {
+          const parts: string[] = [];
+          if (counts.open > 0) parts.push(`${counts.open} items still open`);
+          if (counts.deferred > 0) parts.push(`${counts.deferred} items deferred (incomplete)`);
+          return {
+            passed: false,
+            reason: `operator_attested: job not complete — ${parts.join(', ')}; refuse to attest a partial job`,
+          };
+        }
+        return true;
+      },
+      { costly: true },
     );
 }
 
@@ -231,7 +312,7 @@ export function serializeSpec(spec: CompletionCheckSpec): string {
 export async function runDeterministicHooks(
   spec: CompletionCheckSpec,
   registry: CheckRegistry,
-  ctx: HookContext & { mode?: 'lattice' | 'auto' },
+  ctx: HookContext & { mode?: 'lattice' | 'auto' | 'operator' },
 ): Promise<CheckOutcome> {
   const mode = ctx.mode ?? 'lattice';
   for (const h of spec.hooks) {
@@ -249,7 +330,7 @@ export async function runDeterministicHooks(
         reason: `${h.name}: costly gate deferred to explicit close (not run in auto sweep)`,
       };
     }
-    const out = await reg.fn(h.args ?? {}, { item: ctx.item, cycle: ctx.cycle });
+    const out = await reg.fn(h.args ?? {}, { item: ctx.item, cycle: ctx.cycle, ...(ctx.db ? { db: ctx.db } : {}) });
     if (out === false || (typeof out === 'object' && !out.passed)) {
       const reason = typeof out === 'object' && out.reason ? out.reason : `${h.name} failed`;
       return { result: 'failed', reason };
@@ -273,6 +354,31 @@ export interface GateSummary {
   readonly reason: string;
   /** True when ≥1 costly hook was intentionally NOT executed here. */
   readonly deferred: boolean;
+  /**
+   * Categorisation of the gate's state, used by the prompt renderer
+   * (ground.ts:renderTasksBlock) to choose the right line shape. Five
+   * categories cover the full matrix — the renderer never has to inspect
+   * the spec or registry itself:
+   *   - 'cheap_pass'                — all cheap hooks pass, no costly hook in the spec
+   *   - 'cheap_pass_costly_pending' — cheap pass + a costly hook will run on explicit close
+   *   - 'cheap_fail'                — at least one cheap hook failed (reason carries which)
+   *   - 'costly_only'               — no cheap hooks; only a costly hook (named in costlyHook)
+   *   - 'unknown_hook'              — spec references a hook the registry does not know
+   */
+  readonly kind:
+    | 'cheap_pass'
+    | 'cheap_pass_costly_pending'
+    | 'cheap_fail'
+    | 'costly_only'
+    | 'unknown_hook';
+  /**
+   * When the gate involves a costly hook ('cheap_pass_costly_pending' or
+   * 'costly_only'), the name of the first costly hook present in the
+   * spec. The renderer uses this to distinguish acknowledgement-only
+   * hooks (step_acknowledged, operator_attested) from runtime-check
+   * hooks (command_exits_zero, http_status_is).
+   */
+  readonly costlyHook?: string;
 }
 
 /**
@@ -300,13 +406,15 @@ export function summarizeGate(
 ): GateSummary {
   let sawCheap = false;
   let sawDeferred = false;
+  let firstCostlyHook: string | undefined;
   for (const h of spec.hooks) {
     const reg = registry.get(h.name);
     if (!reg) {
-      return { passed: false, reason: `unknown gate hook: ${h.name}`, deferred: false };
+      return { passed: false, reason: `unknown gate hook: ${h.name}`, deferred: false, kind: 'unknown_hook' };
     }
     if (reg.costly) {
       sawDeferred = true;
+      if (!firstCostlyHook) firstCostlyHook = h.name;
       continue;
     }
     const out = reg.fn(h.args ?? {}, { item, cycle });
@@ -317,13 +425,14 @@ export function summarizeGate(
       out !== null && typeof out === 'object' && typeof (out as { then?: unknown }).then === 'function';
     if (isThenable) {
       sawDeferred = true;
+      if (!firstCostlyHook) firstCostlyHook = h.name;
       continue;
     }
     sawCheap = true;
     const res = out as boolean | { passed: boolean; reason?: string };
     if (res === false || (typeof res === 'object' && !res.passed)) {
       const reason = typeof res === 'object' && res.reason ? res.reason : `${h.name} failed`;
-      return { passed: false, reason, deferred: sawDeferred };
+      return { passed: false, reason, deferred: sawDeferred, kind: 'cheap_fail' };
     }
   }
   if (!sawCheap) {
@@ -332,8 +441,10 @@ export function summarizeGate(
           passed: false,
           reason: 'costly gate — verified only on an explicit close-job-item attempt',
           deferred: true,
+          kind: 'costly_only',
+          ...(firstCostlyHook ? { costlyHook: firstCostlyHook } : {}),
         }
-      : { passed: true, reason: 'no deterministic gate', deferred: false };
+      : { passed: true, reason: 'no deterministic gate', deferred: false, kind: 'cheap_pass' };
   }
   return {
     passed: true,
@@ -341,6 +452,8 @@ export function summarizeGate(
       ? 'cheap gates satisfied — a costly gate is still verified on explicit close'
       : 'gate satisfied — close this item via close-job-item',
     deferred: sawDeferred,
+    kind: sawDeferred ? 'cheap_pass_costly_pending' : 'cheap_pass',
+    ...(sawDeferred && firstCostlyHook ? { costlyHook: firstCostlyHook } : {}),
   };
 }
 
@@ -352,6 +465,36 @@ export function defaultIterationCap(spec: CompletionCheckSpec): number {
  * may author? Used to reject invalid gate types on lattice-appended items. */
 export function isKnownHook(name: string): boolean {
   return builtinRegistry().get(name) !== undefined;
+}
+
+/**
+ * Single-source-of-truth guard. REGISTERED_HOOK_NAMES (in @runcor/capabilities)
+ * is what the append-plan-item validator's error message echoes to the
+ * architect; if the two lists drift, the architect gets a list of types
+ * that don't actually work. This module-load assertion makes drift impossible:
+ * every name registered in builtinRegistry MUST be in REGISTERED_HOOK_NAMES,
+ * and vice versa. If you add a hook below, add the name to gate-hook-names.ts
+ * in @runcor/capabilities (or this assertion fires).
+ */
+{
+  const registered = new Set<string>(builtinRegistry().names());
+  const declared = new Set<string>(REGISTERED_HOOK_NAMES);
+  const missingInDeclared: string[] = [];
+  const missingInRegistry: string[] = [];
+  for (const n of registered) if (!declared.has(n)) missingInDeclared.push(n);
+  for (const n of declared) if (!registered.has(n)) missingInRegistry.push(n);
+  if (missingInDeclared.length > 0 || missingInRegistry.length > 0) {
+    throw new Error(
+      `completion-check / gate-hook-names drift detected. ` +
+        (missingInDeclared.length > 0
+          ? `Registered in builtinRegistry but not in REGISTERED_HOOK_NAMES: [${missingInDeclared.join(', ')}]. `
+          : '') +
+        (missingInRegistry.length > 0
+          ? `Declared in REGISTERED_HOOK_NAMES but not registered in builtinRegistry: [${missingInRegistry.join(', ')}]. `
+          : '') +
+        `Update packages/capabilities/src/gate-hook-names.ts to match.`,
+    );
+  }
 }
 
 export type { DeterministicHook };

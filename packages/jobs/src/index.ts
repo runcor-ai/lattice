@@ -24,7 +24,7 @@ export {
   type ClosureRequest,
   type ClosureResult,
 } from './sign-off.js';
-export { JobsService, type CheckAttemptResult, type AppendResult } from './service.js';
+export { JobsService, OperatorItemValidationError, type CheckAttemptResult, type AppendResult } from './service.js';
 export {
   PLAN_MIN_BYTES,
   PLAN_CHECKBOX_REGEX,

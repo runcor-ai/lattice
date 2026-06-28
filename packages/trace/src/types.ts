@@ -84,7 +84,8 @@ export type OperatorAction =
   | 'lifecycle'
   | 'job_handed'
   | 'escalation_decided'
-  | 'restart_marker';
+  | 'restart_marker'
+  | 'attest';
 
 export interface OperatorTraceEntry extends BaseTraceEntry {
   kind: 'operator';
