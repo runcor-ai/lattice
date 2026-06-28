@@ -82,3 +82,8 @@ export {
   InMemoryRegistry,
   type HttpRegistryClientOptions,
 } from './registry-client.js';
+export {
+  REGISTERED_HOOK_NAMES,
+  isRegisteredHookName,
+  type RegisteredHookName,
+} from './gate-hook-names.js';

@@ -155,7 +155,14 @@ export class Checklist {
       defer_reason: null,
       unblock_condition: null,
       unblock_test: null,
-      source: args.source ?? 'operator',
+      // Default is 'lattice_appended', NOT 'operator'. Operator-source
+      // items trigger the entry-layer attestation lock in service.ts (only
+      // POST /api/lattices/:id/items/:item_id/attest can close them); we
+      // do not want every default-source item to fall into that lock. The
+      // bridge's POST /api/lattices/:id/jobs handler still passes
+      // source: 'operator' explicitly for operator-supplied items, which
+      // is the only legitimate source of operator-source items in production.
+      source: args.source ?? 'lattice_appended',
       blocked_by: args.blocked_by ?? null,
     };
     this.insertItem.run(item);

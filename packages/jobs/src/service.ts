@@ -29,10 +29,41 @@ import { checkUnblocked, type PerceptionLike, type UnblockedItem } from './unblo
  * validation + unblock watcher + sign-off.
  */
 export interface CheckAttemptResult {
-  readonly outcome: 'passed' | 'failed_iterating' | 'judgement_required' | 'iteration_cap_exceeded' | 'blocked';
+  /**
+   * `awaiting_operator` — the item carries source='operator' and the
+   * caller did not pass mode='operator'. The lattice (close-job-item
+   * action) and the auto-sweep both call with mode='lattice' / 'auto'
+   * respectively; the only caller that may use mode='operator' is the
+   * bridge's POST /api/lattices/:id/items/:item_id/attest endpoint.
+   * The gate hook is NOT evaluated in this outcome — no file_exists
+   * check, no judgement pass — the architect cannot satisfy operator
+   * items by writing a file or by argument. The protection is keyed
+   * on plan_item.source, which the architect's tool surface has no
+   * authoring or mutating path to (proved by source-immutability.test.ts).
+   */
+  readonly outcome: 'passed' | 'failed_iterating' | 'judgement_required' | 'iteration_cap_exceeded' | 'blocked' | 'awaiting_operator';
   readonly item: Item;
   readonly reason?: string;
   readonly criterion?: string;
+}
+
+/**
+ * Thrown by JobsService.addItem when an operator-source item is misconfigured.
+ * Carries a stable machine-readable `code` so the bridge can map to a 409 with
+ * an actionable message:
+ *   - 'operator_item_invalid_gate': file_exists used on an operator item.
+ *   - 'operator_item_missing_blocked_by': blocked_by:null with non-operator siblings.
+ */
+export class OperatorItemValidationError extends Error {
+  readonly code: 'operator_item_invalid_gate' | 'operator_item_missing_blocked_by';
+  constructor(
+    code: OperatorItemValidationError['code'],
+    message: string,
+  ) {
+    super(message);
+    this.code = code;
+    this.name = 'OperatorItemValidationError';
+  }
 }
 
 export class JobsService {
@@ -57,6 +88,42 @@ export class JobsService {
     jobId: string,
     args: { description: string; spec: CompletionCheckSpec; source?: string; blocked_by?: string | null },
   ): Item {
+    // Operator-item authoring guards. Operator items are the terminal sign-off
+    // surface; misconfiguration here lets the architect grind closes (run-3's
+    // failure) or lets a file stand in for a judgment (run-2's failure). Both
+    // are structurally blocked at insert time:
+    //
+    //   (1) file_exists gates are forbidden on source='operator' items. A file
+    //       at any path is not a judgment — the only legitimate gate for
+    //       terminal attestation is `operator_attested`, which the bridge
+    //       /attest endpoint satisfies via the operator_attestation table.
+    //
+    //   (2) blocked_by:null is forbidden on source='operator' items when the
+    //       job already has non-operator items. A null-blocked operator item
+    //       appears reachable in the architect's open-tasks block from cycle
+    //       one and tempts grind closes under stall pressure.
+    if (args.source === 'operator') {
+      for (const h of args.spec.hooks ?? []) {
+        if (h.name === 'file_exists') {
+          throw new OperatorItemValidationError(
+            'operator_item_invalid_gate',
+            `operator items must not use the file_exists hook — a file is not a judgment. Use operator_attested instead.`,
+          );
+        }
+      }
+      const blockedByMissing = args.blocked_by === null || args.blocked_by === undefined;
+      if (blockedByMissing) {
+        const nonOperatorSiblings = this.checklist
+          .items(jobId)
+          .filter((it) => it.source !== 'operator');
+        if (nonOperatorSiblings.length > 0) {
+          throw new OperatorItemValidationError(
+            'operator_item_missing_blocked_by',
+            `operator items must set blocked_by when the job already has non-operator items (${nonOperatorSiblings.length} found). A null-blocked operator item is visible in the architect's open-tasks block from the start and invites grind-closes.`,
+          );
+        }
+      }
+    }
     const completion_check = JSON.stringify(args.spec);
     return this.checklist.addItem(jobId, {
       description: args.description,
@@ -92,10 +159,29 @@ export class JobsService {
    */
   async attemptCheck(
     itemId: string,
-    ctx: { cycle: number; mode?: 'lattice' | 'auto' },
+    ctx: { cycle: number; mode?: 'lattice' | 'auto' | 'operator' },
   ): Promise<CheckAttemptResult> {
     const item = this.checklist.getItem(itemId);
     if (!item) throw new Error(`item ${itemId} not found`);
+
+    // Operator-attestation lock. Items with source='operator' are the
+    // human checkpoint — the one sign-off the architect cannot give
+    // itself. Refuse before any gate hook runs unless the caller is
+    // the operator endpoint (mode='operator'). The architect's
+    // close-job-item path defaults to mode='lattice'; the auto-sweep
+    // uses mode='auto'; only POST /api/lattices/:id/items/:item_id/attest
+    // passes mode='operator'. The architect has no manifest action that
+    // sets that mode, and plan_item.source is architect-immutable (proved
+    // by jobs/src/source-immutability.test.ts). The protection is
+    // structural — the failure (architect self-attests) is unrepresentable.
+    const mode = ctx.mode ?? 'lattice';
+    if (item.source === 'operator' && mode !== 'operator') {
+      return {
+        outcome: 'awaiting_operator',
+        item,
+        reason: `item is source='operator' — closeable only via POST /api/lattices/${'{id}'}/items/${itemId}/attest`,
+      };
+    }
 
     // Item 5 — ordered chaining: an item cannot pass until its blocker
     // passes. Reported as 'blocked' (no hooks run, no iteration consumed)
@@ -113,7 +199,6 @@ export class JobsService {
 
     const spec = parseSpec(item.completion_check);
     const cap = defaultIterationCap(spec);
-    const mode = ctx.mode ?? 'lattice';
 
     if (item.iteration_count >= cap) {
       return {
@@ -123,7 +208,7 @@ export class JobsService {
       };
     }
 
-    const out = await runDeterministicHooks(spec, this.registry, { item, cycle: ctx.cycle, mode });
+    const out = await runDeterministicHooks(spec, this.registry, { item, cycle: ctx.cycle, mode, db: this.db });
     if (out.result === 'failed') {
       if (mode === 'lattice') {
         this.checklist.incrementIterationOf(itemId);

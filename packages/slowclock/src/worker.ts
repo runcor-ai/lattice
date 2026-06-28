@@ -33,6 +33,12 @@ export interface SlowclockWorkerOptions {
   readonly detector?: DriftDetector;
   /** Optional trace JSONL path for slow-clock events. */
   readonly tracePath?: string | null;
+  /**
+   * Optional base directory the watchdog's claim_vs_disk detector uses when
+   * resolving RELATIVE claimed paths. Explicit — no implicit process.cwd().
+   * If unset, relative paths are SKIPPED (a benign trace note is written).
+   */
+  readonly pathRoot?: string;
 }
 
 export interface SlowclockWakeOutcome {
@@ -51,6 +57,7 @@ export class SlowclockWorker {
   private readonly cadence: CadenceParams;
   private readonly detector: DriftDetector | undefined;
   private readonly loadMetric: (db: Db) => number;
+  private readonly pathRoot: string | undefined;
 
   private nextWakeAtCycleVal: number;
   private lastWakeAtCycle = 0;
@@ -68,6 +75,7 @@ export class SlowclockWorker {
     this.cadence = opts.cadence ?? DEFAULT_CADENCE;
     this.detector = opts.detector;
     this.loadMetric = opts.loadMetric ?? (() => 1.0);
+    this.pathRoot = opts.pathRoot;
 
     const traceOpts: TraceOptions = {
       jsonlPath: opts.tracePath ?? null,
@@ -110,9 +118,14 @@ export class SlowclockWorker {
     this.db.exec('BEGIN IMMEDIATE');
     try {
       consResult = consolidate(this.db, { cycle, at_ms });
+      const driftCtx = {
+        cycle,
+        at_ms,
+        ...(this.pathRoot !== undefined ? { pathRoot: this.pathRoot } : {}),
+      };
       driftResult = this.detector
-        ? driftReview(this.db, { cycle, at_ms }, this.detector)
-        : driftReview(this.db, { cycle, at_ms });
+        ? driftReview(this.db, driftCtx, this.detector)
+        : driftReview(this.db, driftCtx);
       this.db.exec('COMMIT');
     } catch (err) {
       try {

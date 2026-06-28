@@ -33,3 +33,5 @@ export { act } from './phases/act.js';
 export { judge } from './phases/judge.js';
 export { write } from './phases/write.js';
 export { pulse } from './phases/pulse.js';
+export { renderWatchdogCorrections } from './watchdog-corrections.js';
+export { renderOpenQuestions } from './open-questions.js';

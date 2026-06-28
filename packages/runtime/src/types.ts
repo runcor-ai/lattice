@@ -92,7 +92,32 @@ export interface TasksView {
     id: string;
     description: string;
     iteration_count: number;
-    gate: { passed: boolean; reason: string; deferred: boolean };
+    gate: {
+      passed: boolean;
+      reason: string;
+      deferred: boolean;
+      /** Categorisation used by ground.ts to choose the line shape — see GateSummary in completion-check.ts. */
+      kind: 'cheap_pass' | 'cheap_pass_costly_pending' | 'cheap_fail' | 'costly_only' | 'unknown_hook';
+      /** Name of the first costly hook in the spec, when relevant. */
+      costlyHook?: string;
+    };
+    /**
+     * When this item is blocked_by another item AND that blocker is still
+     * open, surface the blocker's ordinal so the ground prompt can annotate
+     * "(blocked by ord=K open)" — preventing the architect from picking
+     * transitively-blocked items whose close would silently no-op.
+     * Null when the item has no blocker or its blocker is already passed.
+     */
+    blockedBy: { ordinal: number } | null;
+    /**
+     * Provenance of the item, surfaced so the ground prompt can annotate
+     * operator-attestation items as un-closeable from the architect's
+     * surface. attemptCheck refuses any non-operator mode on source='operator'
+     * items (jobs/src/service.ts) — without this annotation the architect
+     * burns cycles trying close-job-item on items it structurally cannot
+     * close.
+     */
+    source: string;
   }[];
 }
 

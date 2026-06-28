@@ -380,6 +380,51 @@ export const MIGRATIONS: readonly Migration[] = [
          AND completion_check LIKE '%.step-%.done%';
     `,
   },
+  {
+    version: 23,
+    description:
+      'memory_semantic_correction.resolved_at_{ms,cycle} — watchdog correction age-out (Step 1 of three-tier watchdog). Lets the recall selector filter out corrections whose underlying object-divergence has resolved, without deleting the audit row (forensic history "fixed at c40, broke again at c80" is preserved by writing a fresh row on recurrence). NULL on existing rows = unresolved.',
+    sql: `
+      ALTER TABLE memory_semantic_correction ADD COLUMN resolved_at_ms INTEGER;
+      ALTER TABLE memory_semantic_correction ADD COLUMN resolved_at_cycle INTEGER;
+    `,
+  },
+  {
+    version: 24,
+    description:
+      'drift_open_question — the Tier-3 surface table (three-tier watchdog Step 4). PHYSICALLY SEPARATE from memory_semantic_correction so the corrections selector cannot reach Tier-3 surfaces and a future refactor cannot accidentally route a question into the fact channel. NOT-NULL on the three position-text columns means a row carrying only one position is structurally unwritable: every surface MUST quote BOTH the lattice and the watchdog and explicitly name why no external object adjudicates. Age-out is decision-keyed (a memory marker the lattice writes), never object-keyed.',
+    sql: `
+      CREATE TABLE drift_open_question (
+        id                     TEXT PRIMARY KEY,
+        kind                   TEXT NOT NULL,
+        cycle                  INTEGER NOT NULL,
+        at_ms                  INTEGER NOT NULL,
+        item_id                TEXT,
+        lattice_position       TEXT NOT NULL CHECK (length(lattice_position) > 0),
+        watchdog_position      TEXT NOT NULL CHECK (length(watchdog_position) > 0),
+        no_object_reason       TEXT NOT NULL CHECK (length(no_object_reason) > 0),
+        resolved_at_ms         INTEGER,
+        resolved_at_cycle      INTEGER,
+        resolved_by_memory_id  TEXT
+      );
+      CREATE INDEX drift_open_question_unresolved
+        ON drift_open_question (cycle) WHERE resolved_at_ms IS NULL;
+    `,
+  },
+  {
+    version: 25,
+    description:
+      'operator_attestation — terminal sign-off table. The ONLY satisfier for the operator_attested completion-check hook. Only writer is the bridge POST /api/lattices/:id/items/:item_id/attest endpoint; the architect tool surface has no path that inserts here (verified by jobs/source-immutability.test.ts). Run-2 bug: ord=1 used a file_exists gate, so any 4000-byte file at the gated path satisfied "operator has signed off the whole job." Run-3 confirmed: run-2 leftover file falsely satisfied ord=1, architect ground 6 close attempts before the no-progress circuit-breaker fired. Fix: a presence-of-row marker that NO file (any path, any author) can produce. The hook ALSO checks zero non-passed siblings — a deferred item is unfinished work, not excluded; deferral cannot launder incompleteness.',
+    sql: `
+      CREATE TABLE operator_attestation (
+        item_id           TEXT PRIMARY KEY,
+        lattice_id        TEXT NOT NULL,
+        attested_at_cycle INTEGER NOT NULL,
+        attested_at_ms    INTEGER NOT NULL,
+        note              TEXT
+      );
+    `,
+  },
 ];
 
 export function appliedVersions(db: Db): Set<number> {

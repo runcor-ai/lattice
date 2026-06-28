@@ -33,9 +33,8 @@ data-*/
 snapshots/
 
 # Per-task port/working trees created by lattices configured with
-# fs-write capabilities pointed at the repo root (e.g. abc-port/ for
-# the worked example migration exercise). These are runtime artefacts of
-# running lattices, not source.
+# fs-write capabilities pointed at the repo root. These are runtime
+# artefacts of running lattices, not source.
 abc-port/
 
 # Logs
@@ -60,3 +59,5 @@ live-run-output/
 live-run-output-*/
 coherence-run/
 coherence-results/
+apps/bridge-api/data/
+**/*.sqlite
