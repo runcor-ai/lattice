@@ -114,6 +114,35 @@ export function progressMetrics(db: Db): { passed: number; openJobs: number } {
   return { passed, openJobs };
 }
 
+/**
+ * True iff the only open work left is operator attestation: there is ≥1 open
+ * item across open jobs AND every open item is source='operator' (the
+ * architect-immutable, architect-uncloseable class — see
+ * jobs/src/source-immutability.test.ts). This is a REST state, not a stall:
+ * the architect has nothing it can act on and must wait for the operator's
+ * /attest (an unbounded wait by design). A genuine stall leaves ≥1 non-operator
+ * item open, so this returns false and the breakers stay active. Used to exempt
+ * the halt from the persistence + no-progress laws (see act.ts) and to drive the
+ * paused_awaiting_operator rest state (see supervisor.ts).
+ */
+export function awaitingOperator(db: Db): boolean {
+  if (!tableExists(db, 'plan_item') || !tableExists(db, 'plan_job')) return false;
+  try {
+    const rows = db
+      .prepare(
+        `SELECT pi.source AS source
+           FROM plan_item pi JOIN plan_job pj ON pi.job_id = pj.id
+          WHERE pj.status = 'open' AND pi.state = 'open'`,
+      )
+      .all() as Array<{ source: string }>;
+    return rows.length > 0 && rows.every((r) => r.source === 'operator');
+  } catch {
+    // Minimal/legacy schema without a plan_item.source column → treat as NOT
+    // resting (breakers stay active). The real migrated schema always has source.
+    return false;
+  }
+}
+
 /** Encode/parse the progress metrics carried in `progress_state.last_signature`. */
 function encodeSig(m: { passed: number; openJobs: number }): string {
   return `p${m.passed}:j${m.openJobs}`;
@@ -146,8 +175,8 @@ export function recordProgress(db: Db): number {
     | { c: number; s: string }
     | undefined;
   let count: number;
-  if (now.openJobs === 0) {
-    count = 0; // no open jobs — idle, not stalled (Item 9 idle-pauses this)
+  if (now.openJobs === 0 || awaitingOperator(db)) {
+    count = 0; // no open jobs (idle) OR only operator attestation left (resting) — not stalled
   } else if (!prev) {
     count = 0; // first observation this run
   } else {

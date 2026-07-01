@@ -13,10 +13,13 @@ import type { Db } from './db.js';
  * substrate-level fix — enforcement, not advice: the runtime simply
  * refuses the duplicate and forces the lattice to change strategy.
  *
- * Only SUCCESSFULLY-dispatched actions are recorded (see act.ts), so the
- * no-op idle action, failed actions, and denied actions are naturally
- * exempt — idling and retry-after-failure keep working, while redundant
- * repeats and duplicate appends are blocked.
+ * Only SUCCESSFULLY-dispatched actions are recorded (see act.ts): failed and
+ * denied actions are exempt, so retry-after-failure keeps working. NOTE: the
+ * no-op idle action returns 'ok' and IS recorded — so a repeated identical noop
+ * is itself blocked, it is NOT exempt. Legitimate rest at the operator-attestation
+ * halt (where noop-and-wait is the correct move) is handled by act.ts's
+ * `awaitingOperator` exemption, not by non-recording here. Redundant repeats and
+ * duplicate appends are blocked.
  */
 
 export const PERSISTENCE_WINDOW = 10;

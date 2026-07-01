@@ -154,7 +154,7 @@ export type InstantiateResponse = z.infer<typeof InstantiateResponseSchema>;
 
 /* -------------------- Roster + inspect -------------------- */
 
-export const LatticeStatusSchema = z.enum(['running', 'paused', 'stopped', 'crashed', 'paused_no_jobs']);
+export const LatticeStatusSchema = z.enum(['running', 'paused', 'stopped', 'crashed', 'paused_no_jobs', 'paused_awaiting_operator']);
 export type LatticeStatus = z.infer<typeof LatticeStatusSchema>;
 
 export const RosterRowSchema = z.object({

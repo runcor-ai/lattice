@@ -2,6 +2,7 @@ import { actOne, type ActContext } from '@runcor/capabilities';
 import { JobsService } from '@runcor/jobs';
 
 import {
+  awaitingOperator,
   dominantRecentAction,
   isReadCapped,
   NO_PROGRESS_ESCALATE,
@@ -64,7 +65,16 @@ export async function act(ctx: CycleContext, prev: DecideOutput): Promise<ActOut
   const db = (ctx.memory as RuntimeMemoryAdapter).dbHandle();
   const inputHash = prev.chosenAction ? hashActionInput(prev.chosenInput) : '';
 
-  if (prev.chosenAction && isPersistenceViolation(db, prev.chosenAction, inputHash, ctx.cycle)) {
+  // Operator-attestation rest state. When the only open item(s) are operator-source
+  // (architect-uncloseable), the architect is RESTING, not stalling — it must wait for
+  // the operator's /attest, an unbounded wait by design. Exempt it from EVERY
+  // no-progress consequence (persistence block, THRESHOLD block, ESCALATE park) so a
+  // legitimate noop-and-wait is not punished into churn — and so ESCALATE cannot defer
+  // the operator item itself. `awaitingOperator` is false the instant any non-operator
+  // item is open, so genuine stalls stay fully guarded.
+  const resting = awaitingOperator(db);
+
+  if (prev.chosenAction && !resting && isPersistenceViolation(db, prev.chosenAction, inputHash, ctx.cycle)) {
     ctx.trace.write({
       kind: 'substrate',
       cycle: ctx.cycle,
@@ -98,7 +108,7 @@ export async function act(ctx: CycleContext, prev: DecideOutput): Promise<ActOut
   // auto-resumes it. This is the necessary partner to the #12 confabulation gate: the
   // gate refuses a bad/unsupported commit, and E ends the resulting stall by PARKING
   // honestly instead of spinning. Without E, every gate refusal becomes a spin.
-  if (noProgress >= NO_PROGRESS_ESCALATE) {
+  if (!resting && noProgress >= NO_PROGRESS_ESCALATE) {
     const reason = `no-progress circuit-breaker: ${noProgress} cycles without any item closing or gate clearing — autonomous park`;
     const deferred = deferOpenJobItems(db, ctx.cycle, reason);
     ctx.trace.write({
@@ -117,7 +127,7 @@ export async function act(ctx: CycleContext, prev: DecideOutput): Promise<ActOut
     };
   }
 
-  if (prev.chosenAction && noProgress >= NO_PROGRESS_THRESHOLD) {
+  if (prev.chosenAction && !resting && noProgress >= NO_PROGRESS_THRESHOLD) {
     const dominant = dominantRecentAction(db);
     if (dominant && prev.chosenAction === dominant) {
       ctx.trace.write({
@@ -209,8 +219,12 @@ export async function act(ctx: CycleContext, prev: DecideOutput): Promise<ActOut
           actData: out.data,
         };
       }
-      // Record only dispatched (ok) actions — this is what makes idle/
-      // failed/denied naturally exempt from the Persistence law.
+      // Record dispatched (ok) actions for the Persistence law. NOTE: the no-op
+      // idle action returns 'ok' and IS recorded, so a repeated identical noop is
+      // itself persistence-blocked — it is NOT exempt. Legitimate rest at the
+      // operator-attestation halt is handled by the `resting` (awaitingOperator)
+      // exemption above, not by non-recording here. Only failed/denied are
+      // naturally exempt (they never reach this line).
       if (prev.chosenAction) recordAction(db, prev.chosenAction, inputHash, ctx.cycle);
       // First successful read of a signal is recorded → a re-read of it is capped (#16).
       if (readKey) recordSignalRead(db, readKey, ctx.cycle);

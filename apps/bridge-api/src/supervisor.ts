@@ -29,7 +29,7 @@ import {
 } from '@runcor/engine';
 import { composePersona, PersonaBundleRegistry } from '@runcor/identity';
 import { Memory } from '@runcor/memory';
-import { Lattice, type LatticeOptions } from '@runcor/runtime';
+import { awaitingOperator, Lattice, type LatticeOptions } from '@runcor/runtime';
 
 import { ensureWorkspaceRoot } from './workspace.js';
 
@@ -81,7 +81,7 @@ interface Record {
   readonly sqlitePath: string;
   readonly lattice: Lattice;
   readonly modelBackendKind: ModelBackendSpec['kind'];
-  status: 'running' | 'paused' | 'stopped' | 'crashed' | 'paused_no_jobs';
+  status: 'running' | 'paused' | 'stopped' | 'crashed' | 'paused_no_jobs' | 'paused_awaiting_operator';
   loopController: AbortController | null;
   loopPromise: Promise<unknown> | null;
   /**
@@ -291,14 +291,15 @@ export class Supervisor {
       try {
         while (!ctrl.signal.aborted) {
           await record.lattice.runOnce(ctrl.signal);
-          if (record.pauseOnNoOpenJobs && this.shouldIdlePause(record.lattice)) {
-            record.status = 'paused_no_jobs';
+          const idleReason = record.pauseOnNoOpenJobs ? this.idlePauseReason(record.lattice) : null;
+          if (idleReason) {
+            record.status = idleReason === 'awaiting_operator' ? 'paused_awaiting_operator' : 'paused_no_jobs';
             record.lattice.trace.write({
               kind: 'operator',
               cycle: record.lattice.completedCycle,
               at_ms: Date.now(),
               action: 'lifecycle',
-              detail: 'paused_no_jobs_remaining',
+              detail: idleReason === 'awaiting_operator' ? 'paused_awaiting_operator' : 'paused_no_jobs_remaining',
             });
             return; // stop ticking; record stays alive; wake() restarts it
           }
@@ -313,16 +314,26 @@ export class Supervisor {
   }
 
   /**
-   * Item 9 — true when the lattice has had at least one job and none are
-   * open now. A jobless lattice (total = 0) returns false so it keeps
-   * cycling until its first job arrives.
+   * Item 9 (+ awaiting-operator rest state). Returns WHY the lattice should
+   * idle-pause, or null to keep cycling:
+   *   - 'no_jobs'          — it has had ≥1 job and none are open now.
+   *   - 'awaiting_operator'— open jobs remain but the ONLY open work is
+   *                          operator attestation the architect cannot close
+   *                          (an unbounded operator wait — resting, not stalled).
+   * A jobless lattice (total = 0) returns null so it keeps cycling until its
+   * first job arrives.
    */
-  private shouldIdlePause(lattice: Lattice): boolean {
+  private idlePauseReason(lattice: Lattice): 'no_jobs' | 'awaiting_operator' | null {
     const db = lattice.dbHandle();
     const open = (db.prepare(`SELECT COUNT(*) AS n FROM plan_job WHERE status = 'open'`).get() as { n: number }).n;
-    if (open > 0) return false;
-    const total = (db.prepare(`SELECT COUNT(*) AS n FROM plan_job`).get() as { n: number }).n;
-    return total > 0;
+    if (open === 0) {
+      const total = (db.prepare(`SELECT COUNT(*) AS n FROM plan_job`).get() as { n: number }).n;
+      return total > 0 ? 'no_jobs' : null;
+    }
+    // Open jobs remain — only a REST state if the sole open work is operator
+    // attestation. awaitingOperator keys on source='operator' (architect-immutable),
+    // so any open non-operator item (a genuine stall) keeps the lattice cycling.
+    return awaitingOperator(db) ? 'awaiting_operator' : null;
   }
 
   pause(id: string): boolean {
@@ -352,7 +363,7 @@ export class Supervisor {
   wake(id: string): boolean {
     const r = this.records.get(id);
     if (!r) return false;
-    if (r.status !== 'paused_no_jobs') return false;
+    if (r.status !== 'paused_no_jobs' && r.status !== 'paused_awaiting_operator') return false;
     r.loopController = new AbortController();
     r.status = 'running';
     r.lattice.trace.write({

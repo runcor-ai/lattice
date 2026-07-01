@@ -682,9 +682,15 @@ export async function buildServer(opts: BuildServerOptions): Promise<BuiltServer
     const { id, item_id } = req.params as { id: string; item_id: string };
     const r = supervisor.get(id);
     if (!r) return reply.code(404).send(errorBody('lattice_not_found', `no lattice ${id}`));
-    const note = (req.body && typeof (req.body as { note?: unknown }).note === 'string')
-      ? (req.body as { note: string }).note
-      : '';
+    // Accept both `note` and `operator_note` so a common client key isn't
+    // silently dropped from the audit trail (bonus fix — the field mismatch
+    // left tonight's attestation note empty).
+    const _b = (req.body ?? {}) as { note?: unknown; operator_note?: unknown };
+    const note = typeof _b.note === 'string'
+      ? _b.note
+      : typeof _b.operator_note === 'string'
+        ? _b.operator_note
+        : '';
     const { JobsService } = await import('@runcor/jobs');
     const jobs = new JobsService(r.lattice.dbHandle());
     const item = jobs.checklist.getItem(item_id);
@@ -738,7 +744,30 @@ export async function buildServer(opts: BuildServerOptions): Promise<BuiltServer
       detail: `item=${item_id} outcome=${result.outcome}${note ? ` note=${note.slice(0, 200)}` : ''}`,
     });
     if (result.outcome === 'passed') {
-      return reply.code(200).send({ item_id, outcome: 'passed', passed_at_cycle: result.item.passed_at_cycle });
+      // F3 — attestation is terminal, so close the job SYNCHRONOUSLY here. A
+      // hard-stopped entity never cycles again (and cannot be woken), so without
+      // this the job would stay `open` after a stopped-then-attested close.
+      // operatorApproved:true so autonomy=low does not hold it pending — the
+      // operator is the one approving.
+      let job_status: string | undefined;
+      try {
+        const c = jobs.close({
+          jobId: item.job_id,
+          cycle: r.lattice.completedCycle,
+          at_ms: Date.now(),
+          autonomy: r.lattice.autonomy,
+          operatorApproved: true,
+        });
+        if (c.result === 'closed') job_status = c.job.status;
+      } catch {
+        /* best-effort — the item is passed regardless of job-close outcome */
+      }
+      // If the entity is resting (paused_awaiting_operator) or idle, wake it so a
+      // live cycle performs the idle transition (→ paused_no_jobs). No-op if stopped.
+      supervisor.wake(id);
+      return reply
+        .code(200)
+        .send({ item_id, outcome: 'passed', passed_at_cycle: result.item.passed_at_cycle, job_status });
     }
     // Gate didn't pass even under operator mode — the deliverable isn't on
     // disk yet, the blocker chain isn't clear, or some other hook says no.

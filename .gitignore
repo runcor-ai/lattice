@@ -61,3 +61,8 @@ coherence-run/
 coherence-results/
 apps/bridge-api/data/
 **/*.sqlite
+
+# local isolation: scratch data + diagnostic helpers (not part of the repo)
+data/
+run-output/
+apps/bridge-api/_*.cjs
