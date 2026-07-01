@@ -419,11 +419,51 @@ describe('Item 9 — pause-on-no-open-jobs dial', () => {
     const r = await app.inject({ method: 'POST', url: `/api/lattices/${id}/jobs`, payload: jobPayload(hook) });
     return (r.json() as { job_id: string }).job_id;
   }
+  // A plan-only job (no operator item): once its plan gate is satisfied and the
+  // chained plan step passes, the job closes legitimately (closed_full) with no
+  // operator attestation outstanding — the correct way to drive the entity to
+  // "no open jobs". (An operator item would instead leave the job RESTING in
+  // paused_awaiting_operator — see the rest-state test below. The old versions
+  // of these tests used an operator item and only reached paused_no_jobs because
+  // the no-progress ESCALATE breaker force-deferred it — the F1 bug now fixed.)
+  async function postPlanJob(
+    app: Awaited<ReturnType<typeof makeApp>>['app'],
+    id: string,
+  ): Promise<string> {
+    const r = await app.inject({
+      method: 'POST',
+      url: `/api/lattices/${id}/jobs`,
+      payload: { title: 't', body: '', why: 'because the operator said so' },
+    });
+    return (r.json() as { job_id: string }).job_id;
+  }
+  // A job whose terminal item is a real operator_attested sign-off (the handler
+  // forces source='operator'). After the plan gate clears, that item is the only
+  // open work → the entity rests in paused_awaiting_operator (F1); only /attest
+  // can close it.
+  async function postAttestJob(
+    app: Awaited<ReturnType<typeof makeApp>>['app'],
+    id: string,
+  ): Promise<string> {
+    const r = await app.inject({
+      method: 'POST',
+      url: `/api/lattices/${id}/jobs`,
+      payload: {
+        title: 't',
+        body: '',
+        why: 'because the operator said so',
+        items: [
+          { description: 'operator sign-off', completion_check: JSON.stringify({ hooks: [{ name: 'operator_attested', args: {} }] }) },
+        ],
+      },
+    });
+    return (r.json() as { job_id: string }).job_id;
+  }
 
   it('auto-pauses (paused_no_jobs) once its only job closes', async () => {
     const { app, supervisor } = await makeApp();
     const id = await instantiate(app);
-    const jobId = await postJob(app, id, 'always_pass');
+    const jobId = await postPlanJob(app, id);
     satisfyPlanGate(supervisor.get(id)!.lattice.dbHandle() as MiniDb, jobId);
 
     const reached = await waitFor(() => supervisor.get(id)?.status === 'paused_no_jobs');
@@ -439,12 +479,12 @@ describe('Item 9 — pause-on-no-open-jobs dial', () => {
   it('handing a new job to an idle-paused lattice wakes it', async () => {
     const { app, supervisor } = await makeApp();
     const id = await instantiate(app);
-    const jobId = await postJob(app, id, 'always_pass');
+    const jobId = await postPlanJob(app, id);
     satisfyPlanGate(supervisor.get(id)!.lattice.dbHandle() as MiniDb, jobId);
     expect(await waitFor(() => supervisor.get(id)?.status === 'paused_no_jobs')).toBe(true);
 
-    // A job whose plan gate is NOT satisfied keeps the lattice running after wake.
-    await postJob(app, id, 'always_fail');
+    // A second job whose plan gate is NOT satisfied keeps the lattice running after wake.
+    await postPlanJob(app, id);
     expect(await waitFor(() => supervisor.get(id)?.status === 'running')).toBe(true);
 
     const ops = supervisor.get(id)!.lattice.trace.filter((e) => e.kind === 'operator');
@@ -485,7 +525,7 @@ describe('Item 9 — pause-on-no-open-jobs dial', () => {
   it('disabling the dial while idle-paused wakes the lattice', async () => {
     const { app, supervisor } = await makeApp();
     const id = await instantiate(app);
-    const jobId = await postJob(app, id, 'always_pass');
+    const jobId = await postPlanJob(app, id);
     satisfyPlanGate(supervisor.get(id)!.lattice.dbHandle() as MiniDb, jobId);
     expect(await waitFor(() => supervisor.get(id)?.status === 'paused_no_jobs')).toBe(true);
 
@@ -495,6 +535,34 @@ describe('Item 9 — pause-on-no-open-jobs dial', () => {
       payload: { dials: { pauseOnNoOpenJobs: false }, why: 'operator disables idle-pause' },
     });
     expect(await waitFor(() => supervisor.get(id)?.status === 'running')).toBe(true);
+
+    await supervisor.closeAll();
+    await app.close();
+  });
+
+  it('an operator-only job rests as paused_awaiting_operator, then wakes to closed_full on attest', async () => {
+    const { app, supervisor } = await makeApp();
+    const id = await instantiate(app);
+    const jobId = await postAttestJob(app, id);
+    satisfyPlanGate(supervisor.get(id)!.lattice.dbHandle() as MiniDb, jobId);
+
+    // Plan gate clears and the chained plan step passes; the ONLY open item left is
+    // the operator sign-off. The entity must REST (F1) — it must NOT churn the
+    // no-progress breaker into force-deferring the operator item and idling.
+    expect(await waitFor(() => supervisor.get(id)?.status === 'paused_awaiting_operator')).toBe(true);
+
+    const db = supervisor.get(id)!.lattice.dbHandle() as MiniDb;
+    const opId = (db.prepare("SELECT id FROM plan_item WHERE job_id = ? AND source = 'operator'").get(jobId) as { id: string }).id;
+    const r = await app.inject({
+      method: 'POST',
+      url: `/api/lattices/${id}/items/${opId}/attest`,
+      payload: { operator_note: 'Reviewed. Approved.' },
+    });
+    expect(r.statusCode).toBe(200);
+    expect((r.json() as { job_status?: string }).job_status).toBe('closed_full');
+
+    // The attest wakes the resting entity; with its only job now closed it idles.
+    expect(await waitFor(() => supervisor.get(id)?.status === 'paused_no_jobs')).toBe(true);
 
     await supervisor.closeAll();
     await app.close();
@@ -800,6 +868,71 @@ describe('Secrets', () => {
     const body = r.json() as { hasAnthropicKey: boolean; hasOpenaiKey: boolean };
     expect(body.hasAnthropicKey).toBe(true);
     expect(JSON.stringify(body)).not.toContain('sk-real-secret-key');
+    await supervisor.closeAll();
+    await app.close();
+  });
+});
+
+/* -------------------- attest: close-on-attest (F3) + note-key (bonus) -------------------- */
+
+describe('POST /api/lattices/:id/items/:item_id/attest', () => {
+  // Stage a terminal job directly on the entity DB: a passed system contract item
+  // + an open operator_attested item blocked_by it. (Driving a real lattice to the
+  // halt is covered empirically on the 7110 bridge.)
+  async function stageTerminalJob(supervisor: Awaited<ReturnType<typeof makeApp>>['supervisor'], id: string) {
+    const { JobsService } = await import('@runcor/jobs');
+    const db = supervisor.get(id)!.lattice.dbHandle();
+    const jobs = new JobsService(db);
+    const job = jobs.openJob({ title: 'restack', source: 'operator', why: 'terminal', cycle: 1, at_ms: 1 });
+    const sys = jobs.addItem(job.id, {
+      description: 'plan gate',
+      spec: { hooks: [{ name: 'file_exists', args: { path: 'Z:/plan.md' } }] },
+      source: 'system',
+    });
+    jobs.checklist.markPassed(sys.id, 1, true); // the sole non-operator contract item, passed
+    const op = jobs.addItem(job.id, {
+      description: 'operator sign-off',
+      spec: { hooks: [{ name: 'operator_attested', args: {} }] },
+      source: 'operator',
+      blocked_by: sys.id,
+    });
+    return { jobId: job.id, opId: op.id, db };
+  }
+
+  it('attest → job closes closed_full synchronously (even stopped) and records operator_note', async () => {
+    const { app, supervisor } = await makeApp();
+    const id = ((await app.inject({ method: 'POST', url: '/api/lattices', payload: VALID_INSTANTIATE })).json() as InstantiateResponse).lattice_id;
+    await supervisor.stop(id); // hard-stopped: exercises the synchronous-close path (no cycle will run)
+    const { opId, db } = await stageTerminalJob(supervisor, id);
+
+    const r = await app.inject({
+      method: 'POST',
+      url: `/api/lattices/${id}/items/${opId}/attest`,
+      payload: { operator_note: 'Reviewed. Parity verified.' },
+    });
+    expect(r.statusCode).toBe(200);
+    const body = r.json() as { outcome: string; job_status?: string };
+    expect(body.outcome).toBe('passed');
+    expect(body.job_status).toBe('closed_full'); // F3: closed even though the entity is stopped
+
+    const { JobsService } = await import('@runcor/jobs');
+    expect(new JobsService(db).checklist.getItem(opId)?.state).toBe('passed');
+    const note = (db.prepare('SELECT note FROM operator_attestation WHERE item_id = ?').get(opId) as { note: string }).note;
+    expect(note).toContain('Parity verified'); // 4c: operator_note key lands non-empty
+
+    await supervisor.closeAll();
+    await app.close();
+  });
+
+  it('also accepts the `note` key', async () => {
+    const { app, supervisor } = await makeApp();
+    const id = ((await app.inject({ method: 'POST', url: '/api/lattices', payload: VALID_INSTANTIATE })).json() as InstantiateResponse).lattice_id;
+    await supervisor.stop(id);
+    const { opId, db } = await stageTerminalJob(supervisor, id);
+    const r = await app.inject({ method: 'POST', url: `/api/lattices/${id}/items/${opId}/attest`, payload: { note: 'via note key' } });
+    expect(r.statusCode).toBe(200);
+    const note = (db.prepare('SELECT note FROM operator_attestation WHERE item_id = ?').get(opId) as { note: string }).note;
+    expect(note).toBe('via note key');
     await supervisor.closeAll();
     await app.close();
   });

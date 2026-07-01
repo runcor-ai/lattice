@@ -5,6 +5,7 @@ import type { Db } from './db.js';
 import {
   NO_PROGRESS_ESCALATE,
   NO_PROGRESS_THRESHOLD,
+  awaitingOperator,
   clearHeldSignals,
   dominantRecentAction,
   openJobItemSignature,
@@ -219,5 +220,102 @@ describe('act phase enforces no-progress (Item 15)', () => {
     expect((await act(ctx, read('signal/b.md', 1000))).actResult).toBe('ok'); // genuinely NEW signal — allowed
     clearHeldSignals(db); // a genuine commit (item close) frees the cap
     expect((await act(ctx, read('signal/a.md', 3000))).actResult).toBe('ok'); // re-read allowed again after commit
+  });
+});
+
+/* ---- Finding 1: awaiting-operator rest state ---- */
+
+function sourceDb(): Db {
+  const db = new Database(':memory:') as unknown as Db;
+  db.exec(`
+    CREATE TABLE plan_job (id TEXT PRIMARY KEY, status TEXT NOT NULL);
+    CREATE TABLE plan_item (id TEXT PRIMARY KEY, job_id TEXT NOT NULL, state TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'operator');
+    CREATE TABLE progress_state (id TEXT PRIMARY KEY, no_progress_cycles INTEGER NOT NULL DEFAULT 0, last_signature TEXT NOT NULL DEFAULT '');
+    CREATE TABLE recent_action (cycle INTEGER NOT NULL, action_name TEXT NOT NULL, input_hash TEXT NOT NULL);
+  `);
+  return db;
+}
+
+describe('awaitingOperator predicate (halt rest state)', () => {
+  it('false when nothing open; true only when EVERY open item is source=operator', () => {
+    const db = sourceDb();
+    expect(awaitingOperator(db)).toBe(false); // no jobs/items
+    db.prepare("INSERT INTO plan_job VALUES ('j','open')").run();
+    db.prepare("INSERT INTO plan_item VALUES ('op','j','open','operator')").run();
+    expect(awaitingOperator(db)).toBe(true); // only an operator item open
+    db.prepare("INSERT INTO plan_item VALUES ('w','j','open','plan_step')").run();
+    expect(awaitingOperator(db)).toBe(false); // a non-operator item is open → NOT resting (genuine stall guarded)
+    db.prepare("UPDATE plan_item SET state='passed' WHERE id='w'").run();
+    expect(awaitingOperator(db)).toBe(true); // back to only operator open
+    db.prepare("UPDATE plan_job SET status='closed_full' WHERE id='j'").run();
+    expect(awaitingOperator(db)).toBe(false); // job closed → nothing open
+  });
+
+  it('recordProgress stays 0 across >= THRESHOLD cycles while awaiting operator; re-arms once real work opens', () => {
+    const db = sourceDb();
+    db.prepare("INSERT INTO plan_job VALUES ('j','open')").run();
+    db.prepare("INSERT INTO plan_item VALUES ('op','j','open','operator')").run();
+    for (let i = 0; i < NO_PROGRESS_THRESHOLD + 3; i += 1) {
+      expect(recordProgress(db)).toBe(0); // resting → never climbs (breaker can't fire)
+    }
+    db.prepare("INSERT INTO plan_item VALUES ('w','j','open','plan_step')").run(); // real work appears → no longer resting
+    expect(recordProgress(db)).toBe(1); // counter climbs again — breaker re-armed
+    expect(recordProgress(db)).toBe(2);
+  });
+});
+
+describe('act phase: resting is exempt from ALL no-progress consequences', () => {
+  function restingDb(noProgress: number): Db {
+    const db = new Database(':memory:') as unknown as Db;
+    migrate(db);
+    const jobs = new JobsService(db);
+    const job = jobs.openJob({ title: 'done', source: 'operator', why: 'awaiting attest', cycle: 1, at_ms: 1 });
+    // one operator item, no non-operator siblings → blocked_by null is allowed
+    jobs.addItem(job.id, {
+      description: 'operator sign-off',
+      spec: { hooks: [{ name: 'operator_attested', args: {} }] },
+      source: 'operator',
+      blocked_by: null,
+    });
+    db.prepare("INSERT INTO progress_state (id, no_progress_cycles, last_signature) VALUES ('self', ?, 'p0:j1')").run(noProgress);
+    return db;
+  }
+
+  it('repeated identical action is NOT persistence-blocked while resting', async () => {
+    const db = restingDb(0);
+    const ctx = makeCtx(db, []);
+    expect((await act(ctx, prevWith('probe'))).actResult).toBe('ok'); // records probe|{}
+    expect((await act(ctx, prevWith('probe'))).actResult).toBe('ok'); // resting → exact repeat NOT blocked
+  });
+
+  it('THRESHOLD block does NOT fire while resting', async () => {
+    const db = restingDb(NO_PROGRESS_THRESHOLD);
+    const r = await act(makeCtx(db, []), prevWith('probe'));
+    expect(r.actResult).toBe('ok');
+  });
+
+  it('ESCALATE does NOT park or defer the operator item while resting', async () => {
+    const db = restingDb(NO_PROGRESS_ESCALATE);
+    const jobs = new JobsService(db);
+    const opItem = jobs.checklist.items(jobs.checklist.listOpen()[0]!.id)[0]!;
+    const r = await act(makeCtx(db, []), prevWith('probe'));
+    expect(r.actResult).toBe('ok'); // not parked
+    expect(jobs.checklist.getItem(opItem.id)?.state).toBe('open'); // operator item NOT deferred
+  });
+
+  it('precision: once a non-operator item is open, the breakers fire again', async () => {
+    const db = restingDb(0);
+    const jobs = new JobsService(db);
+    const jid = jobs.checklist.listOpen()[0]!.id;
+    jobs.addItem(jid, {
+      description: 'real work',
+      spec: { hooks: [{ name: 'file_exists', args: { path: 'Z:/no.md' } }] },
+      source: 'plan_step',
+    });
+    const ctx = makeCtx(db, []);
+    expect((await act(ctx, prevWith('probe'))).actResult).toBe('ok'); // records probe|{}
+    const r = await act(ctx, prevWith('probe')); // exact repeat, NOT resting → persistence fires
+    expect(r.actResult).toBe('failed');
+    expect(r.actFailedReason).toMatch(/Persistence/);
   });
 });

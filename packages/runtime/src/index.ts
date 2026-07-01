@@ -35,3 +35,4 @@ export { write } from './phases/write.js';
 export { pulse } from './phases/pulse.js';
 export { renderWatchdogCorrections } from './watchdog-corrections.js';
 export { renderOpenQuestions } from './open-questions.js';
+export { awaitingOperator } from './no-progress.js';
