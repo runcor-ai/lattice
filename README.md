@@ -449,3 +449,11 @@ Open an issue or PR. Two things to keep in mind:
 
 1. **Every fix should improve any lattice on any task with the same failure mode.** Task-specific patches don't land here — they're worked at the operator-of-a-specific-lattice level.
 2. **Constitution is non-negotiable scope.** A change that violates one of the 14 principles needs an explicit constitution amendment (a separate PR before the implementation PR).
+
+**Dev setup — enable the git hooks once per clone:**
+
+```bash
+git config core.hooksPath scripts/githooks
+```
+
+This activates the tracked `pre-push` gate (identity + content checks). See [`scripts/githooks/README.md`](scripts/githooks/README.md).

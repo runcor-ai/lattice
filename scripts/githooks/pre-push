@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+#
+# Tracked pre-push hook. Delegates to the committed scanner (identity
+# allowlist + blocklisted-content diff scan). Not active by default — git
+# never transfers hooks on clone. Activate it once per clone with:
+#
+#   git config core.hooksPath scripts/githooks
+#
+# See scripts/githooks/README.md and scripts/name-scan.sh.
+exec "$(git rev-parse --show-toplevel)/scripts/name-scan.sh" "$@"
