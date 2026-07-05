@@ -69,6 +69,13 @@ export interface MemorySink {
  */
 export interface MemoryRecallView {
   recentEpisodic(limit: number): readonly MemoryWrite[];
+  /**
+   * Bug-2 fix — like recentEpisodic, but REINFORCES the pulled window: increments each pulled
+   * entry's access_count (f) and sets last_access_ms=atMs. This is the "record an access" step the
+   * slice-1 recall stub omitted, so f stayed 0 and M=R·ln(f+1)·… collapsed to 0. Only the recall
+   * phase (which actually surfaces memory) should call this; read-only callers use recentEpisodic.
+   */
+  reinforceRecalled(limit: number, atMs: number): readonly MemoryWrite[];
   /** Item 1 — the latest fast-clock situation report, or null before the first. */
   currentSituation(): string | null;
 }

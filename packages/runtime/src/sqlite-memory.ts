@@ -51,6 +51,25 @@ export class RuntimeMemoryAdapter implements MemorySink, MemoryRecallView {
     }));
   }
 
+  /**
+   * Bug-2 fix — pull the recent window AND reinforce it: bump access_count (f) and set
+   * last_access_ms on each pulled entry via the existing (previously uncalled) recordAccess.
+   * Called once per cycle by the recall phase, inside the cycle's transaction. Read-only callers
+   * (ground/write) keep using recentEpisodic so only genuine recall surfacing reinforces f.
+   */
+  reinforceRecalled(limit: number, atMs: number): readonly MemoryWrite[] {
+    const rows = this.memory.episodic.recent(limit);
+    for (const e of rows) {
+      this.memory.episodic.recordAccess(e.id, atMs);
+    }
+    return rows.map((e) => ({
+      system: 'episodic' as const,
+      body: e.body,
+      why: e.why,
+      admissionTag: 'cycle-outcome' as const,
+    }));
+  }
+
   /** Item 1 — the fast-clock situation report (null before the first tick). */
   currentSituation(): string | null {
     const tableExists = this.db

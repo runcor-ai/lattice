@@ -1,5 +1,5 @@
 import { JobsService, type ClosureResult } from '@runcor/jobs';
-import { runSubconsciousSweep } from '@runcor/memory';
+import { consolidate, runSubconsciousSweep } from '@runcor/memory';
 import type { AutonomyLevel } from '@runcor/substrate';
 import type { TraceEntry } from '@runcor/trace';
 
@@ -180,6 +180,37 @@ export async function write(ctx: CycleContext, prev: JudgeOutput): Promise<Write
         rule: 'memory-clock-error',
         now: err instanceof Error ? err.message : String(err),
       });
+    }
+
+    // ── BUG-1: run the decay sweep at the slow-clock cadence ───────────────────────────
+    // Calls the single canonical consolidate() from @runcor/memory (same impl the slowclock
+    // worker uses — no duplication, no import cycle). Runs inside the cycle's BEGIN/COMMIT.
+    // NOTE — the inline CALL SITE is still a temporary shim: the sweep belongs in the SEPARATE
+    // apps/slowclock worker (whitepaper §5.3: "runs in a separate worker process"), which the
+    // bridge does not yet spawn (supervisor.ts sets pids.slow=null). Running it inline BLOCKS the
+    // cycle on the sweep — fine for a small-memory validation run, WRONG for a large multi-week
+    // store. Permanent form = the spawned slowclock worker (deferred to the VM move; do NOT build
+    // the spawn path here). This is about WHERE it's called, not a duplicate implementation.
+    const SLOW_CLOCK_EVERY = 100; // = DEFAULT_CADENCE.baseline (packages/slowclock/src/cadence.ts)
+    if (ctx.memoryClocks && ctx.cycle > 0 && ctx.cycle % SLOW_CLOCK_EVERY === 0) {
+      try {
+        const res = consolidate(db, { cycle: ctx.cycle, at_ms: ctx.at_ms });
+        ctx.trace.write({
+          kind: 'subconscious',
+          cycle: ctx.cycle,
+          at_ms: ctx.at_ms,
+          rule: 'decay-sweep',
+          now: `examined=${res.decay.examined} forgot=${res.decay.forgotten} promoted=${res.promoted} kept=${res.decay.kept}`,
+        });
+      } catch (err) {
+        ctx.trace.write({
+          kind: 'subconscious',
+          cycle: ctx.cycle,
+          at_ms: ctx.at_ms,
+          rule: 'decay-sweep-error',
+          now: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
   }
 

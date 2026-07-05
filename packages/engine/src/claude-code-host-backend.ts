@@ -1,4 +1,6 @@
 import { spawn } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
+import { delimiter, dirname, isAbsolute, join } from 'node:path';
 
 import {
   ModelBackendError,
@@ -160,26 +162,90 @@ export interface SpawnRunnerOptions {
 }
 
 /**
- * spawnCliRunner — production CLI runner. Pipes the prompt to the
- * CLI's stdin; collects stdout + stderr; respects the abortSignal.
+ * resolveClaudeBinary — locate the REAL claude executable ONCE, so we can spawn it directly with
+ * shell:false and never go through cmd.exe + the npm `.cmd` shim.
  *
- * Note: not exercised by tests directly (no host CLI on the test
- * host). Tests use the fake runner pattern.
+ * Why: on Windows, `spawn('claude', …, {shell:true})` runs `cmd.exe /c "claude --print"`, which
+ * resolves the `claude.cmd` npm shim via PATHEXT. Under sustained concurrent load cmd.exe
+ * intermittently fails to re-read that shim mid-run and dies with "The batch file cannot be found"
+ * (exit 1) — the Phase-1 memory-clock-error crash. Spawning the real binary directly removes the
+ * cmd.exe + shim layer entirely, so that failure mode cannot occur.
+ *
+ * Resolution order:
+ *   1. an absolute path that exists → use it;
+ *   2. search PATH (with platform extensions) for `command`;
+ *   3. if the hit is a .cmd/.bat shim, follow it to the real `*.exe` it launches.
+ * FAILS LOUDLY here at startup if nothing resolves — a clear error beats a mysterious mid-run crash.
+ */
+export function resolveClaudeBinary(command = 'claude'): string {
+  if (isAbsolute(command)) {
+    if (existsSync(command)) return command;
+    throw new Error(`claude-code: configured command path does not exist: ${command}`);
+  }
+  const isWin = process.platform === 'win32';
+  const exts = isWin ? ['.exe', '.cmd', '.bat', ''] : [''];
+  const dirs = (process.env.PATH ?? '').split(delimiter).filter(Boolean);
+  let hit: string | undefined;
+  for (const dir of dirs) {
+    for (const ext of exts) {
+      const p = join(dir, command + ext);
+      if (existsSync(p)) {
+        hit = p;
+        break;
+      }
+    }
+    if (hit) break;
+  }
+  if (!hit) {
+    throw new Error(
+      `claude-code: could not resolve '${command}' on PATH. Install the claude CLI or set ` +
+        `model_backend.config.command to the absolute path of the claude binary.`,
+    );
+  }
+  const lower = hit.toLowerCase();
+  if (!lower.endsWith('.cmd') && !lower.endsWith('.bat')) return hit; // real binary / unix shim
+
+  // Follow the npm .cmd shim to the real .exe it launches. The shim references it as
+  // "%dp0%\node_modules\@anthropic-ai\claude-code\bin\claude.exe"; %dp0% == the shim's own dir.
+  const shimDir = dirname(hit);
+  const conventional = join(shimDir, 'node_modules', '@anthropic-ai', 'claude-code', 'bin', 'claude.exe');
+  if (existsSync(conventional)) return conventional;
+  try {
+    const body = readFileSync(hit, 'utf8');
+    const m = body.match(/([^\s"']*claude\.exe)/i);
+    if (m && m[1]) {
+      const target = m[1].replace(/%~?dp0%?[\\/]?/gi, shimDir + '\\');
+      if (existsSync(target)) return target;
+    }
+  } catch {
+    /* fall through to loud failure */
+  }
+  throw new Error(
+    `claude-code: found shim ${hit} but could not locate the real claude executable it launches. ` +
+      `Set model_backend.config.command to the absolute path of claude.exe.`,
+  );
+}
+
+/**
+ * spawnCliRunner — production CLI runner. Resolves the real claude binary ONCE (fails loudly if
+ * absent), then spawns it DIRECTLY with shell:false — no cmd.exe, no shim to lose (Fix B). Pipes
+ * the prompt to stdin; collects stdout + stderr; respects the abortSignal. Shared by the decide
+ * phase and the fast + medium memory clocks — all claude-code calls route through here.
+ *
+ * Note: not exercised by tests directly (no host CLI on the test host). Tests use the fake runner
+ * pattern; resolveClaudeBinary is unit-tested separately.
  */
 export function spawnCliRunner(opts: SpawnRunnerOptions = {}): CliRunner {
-  const command = opts.command ?? 'claude';
   const args = opts.args ?? ['--print'];
   const timeoutMs = opts.timeoutMs ?? 120_000;
-  // Windows npm-installed CLIs are .cmd shims; spawn() without a shell
-  // cannot resolve them by the bare name. Use shell:true on win32 so
-  // cmd.exe handles PATHEXT (.cmd / .bat / .exe).
-  const useShell = process.platform === 'win32';
+  // Resolve ONCE at construction — a missing binary is a loud startup error, not a mid-run crash.
+  const binary = resolveClaudeBinary(opts.command ?? 'claude');
   return {
     run(call: CliInvocation): Promise<CliResult> {
       return new Promise<CliResult>((resolve, reject) => {
-        const child = spawn(command, [...args], {
+        const child = spawn(binary, [...args], {
           stdio: ['pipe', 'pipe', 'pipe'],
-          shell: useShell,
+          shell: false, // direct exec of the resolved binary — no cmd.exe, no .cmd shim race
         });
         let stdout = '';
         let stderr = '';

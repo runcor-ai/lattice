@@ -22,6 +22,11 @@ export {
 } from './recall.js';
 export { Memory, type MemoryWriteRequest } from './memory.js';
 export {
+  consolidate,
+  type ConsolidateContext,
+  type ConsolidateResult,
+} from './consolidate.js';
+export {
   runSubconsciousSweep,
 } from './subconscious.js';
 export type {
