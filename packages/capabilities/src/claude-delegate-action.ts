@@ -98,14 +98,27 @@ export function makeClaudeDelegateAction(
 
       const start = Date.now();
       return await new Promise<ClaudeDelegateResult>((resolveP, rejectP) => {
+        // FIX-005: detached spawn on non-Windows creates a process group
+        // led by the child. Combined with process.kill(-pid, sig) in
+        // killGroup() below, this lets us signal grandchildren too — e.g.
+        // MCP servers or shell subprocesses the CLI spawns with stdio
+        // inheritance. Without a group kill, SIGTERM to the direct child
+        // orphaned grandchildren (adopted by init) that still held the
+        // pipe write-ends, keeping the parent's 'close' event pending
+        // indefinitely (run-11 c22: 40-min hang after child exited).
+        // Windows uses job objects for process-tree management; the
+        // default child.kill() is acceptable there.
+        const isWin = process.platform === 'win32';
         const child = spawn(command, [...args], {
           cwd: chosenWorkdir,
           shell: useShell,
           stdio: ['pipe', 'pipe', 'pipe'],
+          ...(isWin ? {} : { detached: true }),
         });
         let stdout = '';
         let stderr = '';
         let truncated = false;
+        let settled = false;
         const appendCapped = (chunk: string, which: 'stdout' | 'stderr'): void => {
           const cur = which === 'stdout' ? stdout : stderr;
           const remaining = outputCap - cur.length;
@@ -118,13 +131,38 @@ export function makeClaudeDelegateAction(
           else stderr += slice;
           if (chunk.length > remaining) truncated = true;
         };
+
+        // FIX-005: signal the whole process group on non-Windows. Falls
+        // back to direct child.kill() if the group is already gone or if
+        // we're on Windows.
+        const killGroup = (sig: NodeJS.Signals): void => {
+          if (child.pid === undefined) return;
+          if (isWin) {
+            try { child.kill(sig); } catch { /* already gone */ }
+            return;
+          }
+          try {
+            process.kill(-child.pid, sig);
+          } catch {
+            try { child.kill(sig); } catch { /* nothing more to do */ }
+          }
+        };
+
+        // FIX-005: on timeout, group-SIGTERM first, then SIGKILL after a
+        // grace period. This is the last-resort fallback; the happy path
+        // now settles via child.on('exit') long before this fires.
         const timer = setTimeout(() => {
-          child.kill('SIGTERM');
-          rejectP(new Error(`claude-delegate: subtask timed out after ${timeoutMs}ms`));
+          killGroup('SIGTERM');
+          setTimeout(() => killGroup('SIGKILL'), 2000).unref();
+          if (!settled) {
+            settled = true;
+            rejectP(new Error(`claude-delegate: subtask timed out after ${timeoutMs}ms`));
+          }
         }, timeoutMs);
 
         const onAbort = (): void => {
-          child.kill('SIGTERM');
+          killGroup('SIGTERM');
+          setTimeout(() => killGroup('SIGKILL'), 2000).unref();
         };
         ctx.abortSignal.addEventListener('abort', onAbort);
 
@@ -133,20 +171,56 @@ export function makeClaudeDelegateAction(
         child.on('error', (err) => {
           clearTimeout(timer);
           ctx.abortSignal.removeEventListener('abort', onAbort);
-          rejectP(err);
+          if (!settled) {
+            settled = true;
+            rejectP(err);
+          }
         });
+
+        // FIX-005: resolve on 'exit', not 'close'. 'close' waits for all
+        // stdio pipes to close, but grandchildren that inherit the pipes
+        // can hold them open long after the child itself has exited —
+        // which was the run-11 c22 40-min hang. 'exit' fires the moment
+        // the child process exits, which is the completion signal we
+        // actually want. We ALSO destroy the parent-side stdout/stderr
+        // streams so any orphaned pipe fds are released on our side.
+        child.on('exit', (code) => {
+          clearTimeout(timer);
+          ctx.abortSignal.removeEventListener('abort', onAbort);
+          child.stdout?.destroy();
+          child.stderr?.destroy();
+          if (!settled) {
+            settled = true;
+            resolveP({
+              subtask: input.subtask,
+              workdir: chosenWorkdir,
+              exitCode: code ?? 0,
+              stdout,
+              stderr,
+              truncated,
+              elapsedMs: Date.now() - start,
+            });
+          }
+        });
+
+        // FIX-005: 'close' kept as a defensive fallback in case 'exit'
+        // doesn't fire for some reason (rare, e.g. some signal-death
+        // paths). Settle-first-wins: no-op if 'exit' already resolved.
         child.on('close', (code) => {
           clearTimeout(timer);
           ctx.abortSignal.removeEventListener('abort', onAbort);
-          resolveP({
-            subtask: input.subtask,
-            workdir: chosenWorkdir,
-            exitCode: code ?? 0,
-            stdout,
-            stderr,
-            truncated,
-            elapsedMs: Date.now() - start,
-          });
+          if (!settled) {
+            settled = true;
+            resolveP({
+              subtask: input.subtask,
+              workdir: chosenWorkdir,
+              exitCode: code ?? 0,
+              stdout,
+              stderr,
+              truncated,
+              elapsedMs: Date.now() - start,
+            });
+          }
         });
 
         child.stdin.end(input.subtask, 'utf8');
