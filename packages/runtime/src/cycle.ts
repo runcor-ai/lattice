@@ -8,7 +8,7 @@ import { observe } from './phases/observe.js';
 import { pulse } from './phases/pulse.js';
 import { recall } from './phases/recall.js';
 import { write } from './phases/write.js';
-import type { CycleContext, CycleResult, PhaseRunners } from './types.js';
+import type { ActOutput, CycleContext, CycleResult, PhaseRunners } from './types.js';
 
 export const DEFAULT_PHASES: PhaseRunners = {
   observe,
@@ -20,6 +20,51 @@ export const DEFAULT_PHASES: PhaseRunners = {
   write,
   pulse,
 };
+
+/**
+ * FIX-006 (2026-07-18): compose the act phase's `output_summary` string from
+ * the ActOutput's discriminated fields. Prior format collapsed three orthogonal
+ * facts into one bit:
+ *   - DID DISPATCH (pre-spawn substrate law refused vs capability invoked)
+ *   - EXIT CODE (if invoked: 0 or nonzero)
+ *   - failure category (Persistence vs No-progress vs Read-cap vs exec_error vs …)
+ *
+ * New format:
+ *   - `result=ok;exit=<N>`               — capability ran; N is child exit code
+ *     (only when actData.exitCode is a number, e.g. shell-exec)
+ *   - `result=ok`                        — capability succeeded, no exit-code shape
+ *   - `result=no-action`                 — architect chose no action this cycle
+ *   - `result=refused_by_substrate;law=<name>` — Persistence / No-progress / Read-cap
+ *     refused pre-spawn. The full reason lives in actFailedReason / episodic memory.
+ *   - `result=denied`                    — permission gate rejected the invoke
+ *   - `result=exec_error`                — capability threw during invoke, or action
+ *     was not found (structural lookup miss subsumed here for compactness)
+ *
+ * The output_summary is the surface field operators read at a glance in the trace;
+ * full detail remains in `actFailedReason` and `memory_episodic`. This resolves the
+ * FIX-006 c50 silent-fail (publish-app exit 1 read as ok) and the c27/c30/c32
+ * Persistence-refusal-looks-like-check-failure conflation.
+ */
+export function formatActSummary(actOutput: ActOutput): string {
+  if (actOutput.actResult === 'ok') {
+    const data = actOutput.actData as { exitCode?: unknown } | undefined;
+    if (data && typeof data === 'object' && typeof data.exitCode === 'number') {
+      return `result=ok;exit=${data.exitCode}`;
+    }
+    return 'result=ok';
+  }
+  if (actOutput.actResult === 'no-action') return 'result=no-action';
+  // actResult === 'failed'
+  const kind = actOutput.actFailureKind;
+  if (kind === 'persistence' || kind === 'no-progress' || kind === 'read-cap') {
+    return `result=refused_by_substrate;law=${kind}`;
+  }
+  if (kind === 'denied') return 'result=denied';
+  // 'exec_error', 'action_not_found', or undefined (defensive fallback for older
+  // ActOutput shapes) — all bucketed as exec_error for the summary. Callers
+  // still get the exact reason from actFailedReason.
+  return 'result=exec_error';
+}
 
 /**
  * runCycle — execute one pass through the eight phases in pinned
@@ -102,7 +147,10 @@ export async function runCycle(
     out.act = await runPhase(
       'act',
       () => phases.act(ctx, out.decide as any),
-      (r: any) => `result=${r.actResult}`,
+      // FIX-006: use the three-state summary formatter so the trace surface
+      // distinguishes refused_by_substrate / exec_error / exit=N instead of
+      // collapsing them into a single result=failed/ok bit.
+      (r: ActOutput) => formatActSummary(r),
     );
     out.judge = await runPhase(
       'judge',

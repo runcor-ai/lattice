@@ -87,6 +87,7 @@ export async function act(ctx: CycleContext, prev: DecideOutput): Promise<ActOut
     return {
       ...prev,
       actResult: 'failed',
+      actFailureKind: 'persistence',
       actFailedReason: `Persistence violation: "${prev.chosenAction}" with identical inputs was already attempted in the last ${PERSISTENCE_WINDOW} cycles. Choose a different action.`,
     };
   }
@@ -123,6 +124,7 @@ export async function act(ctx: CycleContext, prev: DecideOutput): Promise<ActOut
     return {
       ...prev,
       actResult: 'failed',
+      actFailureKind: 'no-progress',
       actFailedReason: `No-progress circuit-breaker: deferred ${deferred} open item(s) after ${noProgress} cycles without progress. Parked to idle — will resume when new work/signal arrives.`,
     };
   }
@@ -142,6 +144,7 @@ export async function act(ctx: CycleContext, prev: DecideOutput): Promise<ActOut
       return {
         ...prev,
         actResult: 'failed',
+        actFailureKind: 'no-progress',
         actFailedReason: `No-progress intervention: ${noProgress} cycles without any item closing or gate clearing. "${prev.chosenAction}" is the stalled approach — do NOT repeat it. Change posture: delegate the work differently, re-brief the open item with a sharper gate, verify what already exists, or escalate.`,
       };
     }
@@ -172,6 +175,7 @@ export async function act(ctx: CycleContext, prev: DecideOutput): Promise<ActOut
     return {
       ...prev,
       actResult: 'failed',
+      actFailureKind: 'read-cap',
       actFailedReason: `Read-cap: you already read "${readPath}" this run — you HOLD its content. Re-reading is capped to force a decision. Reason over what you hold and COMMIT now: REVISE (if the kill-condition is met) / HOLD / HELD-CAVEAT (if the signal pressures a call but the kill-condition is not yet met). Do NOT re-read.`,
     };
   }
@@ -215,6 +219,11 @@ export async function act(ctx: CycleContext, prev: DecideOutput): Promise<ActOut
         return {
           ...prev,
           actResult: 'failed',
+          // FIX-006: close-job-item's silent-blocked downgrade is a
+          // capability-outcome mismatch, not a substrate refusal or an exec
+          // error. Categorising as 'exec_error' keeps it in the "capability
+          // returned a bad shape / did not do what was asked" bucket.
+          actFailureKind: 'exec_error',
           actFailedReason: `close-job-item ${d.itemId.slice(0, 8)} → ${d.outcome}: ${d.reason ?? '(no reason)'}`,
           actData: out.data,
         };
@@ -232,9 +241,12 @@ export async function act(ctx: CycleContext, prev: DecideOutput): Promise<ActOut
     case 'no-action':
       return { ...prev, actResult: 'no-action' };
     case 'denied':
-      return { ...prev, actResult: 'failed', actFailedReason: `denied: ${out.reason}` };
+      return { ...prev, actResult: 'failed', actFailureKind: 'denied', actFailedReason: `denied: ${out.reason}` };
     case 'failed':
-      return { ...prev, actResult: 'failed', actFailedReason: out.reason };
+      // FIX-006: actOne now carries a kind on 'failed' — 'action_not_found'
+      // (structural lookup miss) vs 'exec_error' (invoke() threw). Propagate
+      // it so the phase-runner's output_summary can distinguish the two.
+      return { ...prev, actResult: 'failed', actFailureKind: out.kind, actFailedReason: out.reason };
     default: {
       const _exhaustive: never = out;
       return _exhaustive;

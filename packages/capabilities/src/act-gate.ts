@@ -6,12 +6,19 @@ import type { ActContext, Capability, PermissionContext } from './types.js';
  * (canInvoke) before invoking the chosen action.
  *
  * Returns a discriminated union the runtime's act phase consumes.
+ *
+ * FIX-006 (2026-07-18): the `failed` variant now carries a `kind`
+ * discriminator so the runtime can tell "the capability itself threw
+ * during invoke" (kind='exec_error') apart from "we couldn't find or
+ * invoke the action at all" (kind='action_not_found'). Both used to
+ * arrive as identical `failed` results, collapsing exec-time errors
+ * with structural lookup errors in the trace's output_summary.
  */
 export type ActResult =
   | { result: 'ok'; data: unknown }
   | { result: 'no-action' }
   | { result: 'denied'; reason: string; escalate: boolean }
-  | { result: 'failed'; reason: string };
+  | { result: 'failed'; kind: 'exec_error' | 'action_not_found'; reason: string };
 
 export interface ActArgs<I> {
   readonly chosenAction: string | null;
@@ -29,6 +36,7 @@ export async function actOne<I>(args: ActArgs<I>): Promise<ActResult> {
   if (!action || !action.invoke) {
     return {
       result: 'failed',
+      kind: 'action_not_found',
       reason: `action not found or not invokable: ${args.chosenAction}`,
     };
   }
@@ -48,6 +56,7 @@ export async function actOne<I>(args: ActArgs<I>): Promise<ActResult> {
   } catch (err) {
     return {
       result: 'failed',
+      kind: 'exec_error',
       reason: err instanceof Error ? err.message : String(err),
     };
   }

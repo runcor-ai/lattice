@@ -150,3 +150,163 @@ describe('act — close-job-item silent-blocked surfacing (run-2 stall fix)', ()
     expect(r.actResult).toBe('ok');
   });
 });
+
+/* ============================================================
+   FIX-006 — three-state failure discrimination
+   ============================================================
+
+   The failure categories exposed by ActFailureKind are consumed by the
+   phase-runner's output_summary formatter (formatActSummary in cycle.ts) to
+   distinguish pre-spawn substrate refusals from capability-level errors
+   from a genuine capability success with nonzero exit.
+
+   Coverage:
+   - Persistence refusal    → actFailureKind='persistence'
+   - No-progress refusal    → actFailureKind='no-progress'
+   - Read-cap refusal       → actFailureKind='read-cap'
+   - Denied by canInvoke    → actFailureKind='denied'
+   - Capability threw       → actFailureKind='exec_error'
+   - Action not found       → actFailureKind='action_not_found'
+   - close-job-item silent-blocked downgrade → actFailureKind='exec_error'
+   - formatActSummary: covers all outcomes above + ok/no-action + exit=N
+============================================================ */
+
+import { formatActSummary } from '../cycle.js';
+import type { ActOutput } from '../types.js';
+
+function throwingStub(name: string, errMsg: string) {
+  return {
+    name,
+    description: 'test stub that throws on invoke',
+    role: { sense: false, action: true },
+    readOnly: false,
+    destructive: false,
+    concurrencySafe: false,
+    isEnabled: () => true,
+    canInvoke: () => ({ allow: true }),
+    invoke: async () => { throw new Error(errMsg); },
+  };
+}
+
+function deniedStub(name: string, reason: string) {
+  return {
+    name,
+    description: 'test stub whose canInvoke denies',
+    role: { sense: false, action: true },
+    readOnly: false,
+    destructive: false,
+    concurrencySafe: false,
+    isEnabled: () => true,
+    canInvoke: () => ({ allow: false, reason, escalate: false }),
+    invoke: async () => ({}),
+  };
+}
+
+describe('act — FIX-006 actFailureKind on failure branches', () => {
+  it('capability threw → actFailureKind=exec_error, reason preserved', async () => {
+    const db = freshDb();
+    const stub = throwingStub('shell-exec', 'shell-exec: verb "rm" not in allowlist');
+    const r = await act(makeCtx(db, 1, [stub], []), prevWith('shell-exec', { command: 'rm -rf /' }));
+    expect(r.actResult).toBe('failed');
+    expect(r.actFailureKind).toBe('exec_error');
+    expect(r.actFailedReason).toContain('not in allowlist');
+  });
+
+  it('action not found → actFailureKind=action_not_found', async () => {
+    const db = freshDb();
+    const r = await act(makeCtx(db, 1, [], []), prevWith('nonexistent-action', {}));
+    expect(r.actResult).toBe('failed');
+    expect(r.actFailureKind).toBe('action_not_found');
+    expect(r.actFailedReason).toContain('action not found');
+  });
+
+  it('denied by canInvoke → actFailureKind=denied', async () => {
+    const db = freshDb();
+    const stub = deniedStub('shell-exec', 'budget exhausted');
+    const r = await act(makeCtx(db, 1, [stub], []), prevWith('shell-exec', {}));
+    expect(r.actResult).toBe('failed');
+    expect(r.actFailureKind).toBe('denied');
+    expect(r.actFailedReason).toContain('budget exhausted');
+  });
+
+  it('close-job-item silent-blocked → actFailureKind=exec_error (capability outcome mismatch)', async () => {
+    const db = freshDb();
+    const stub = makeCloseStub({ itemId: 'itemabc12345', outcome: 'blocked', reason: 'blocked by ord=3' });
+    const r = await act(makeCtx(db, 1, [stub], []), prevWith('close-job-item', { itemId: 'x' }));
+    expect(r.actResult).toBe('failed');
+    expect(r.actFailureKind).toBe('exec_error');
+    expect(r.actFailedReason).toContain('blocked by ord=3');
+  });
+});
+
+describe('formatActSummary — FIX-006 three-state output_summary', () => {
+  const base = { chosenAction: null, chosenInput: {} } as unknown as ActOutput;
+
+  it('actResult=ok with numeric exitCode in actData → result=ok;exit=<N>', () => {
+    const r: ActOutput = { ...base, actResult: 'ok', actData: { exitCode: 0, stdout: '', stderr: '' } };
+    expect(formatActSummary(r)).toBe('result=ok;exit=0');
+    const r1: ActOutput = { ...base, actResult: 'ok', actData: { exitCode: 42, stdout: '', stderr: '' } };
+    expect(formatActSummary(r1)).toBe('result=ok;exit=42');
+  });
+
+  it('actResult=ok without exitCode → result=ok', () => {
+    const r: ActOutput = { ...base, actResult: 'ok', actData: { something: 'else' } };
+    expect(formatActSummary(r)).toBe('result=ok');
+    const r2: ActOutput = { ...base, actResult: 'ok' };
+    expect(formatActSummary(r2)).toBe('result=ok');
+  });
+
+  it('actResult=no-action → result=no-action', () => {
+    const r: ActOutput = { ...base, actResult: 'no-action' };
+    expect(formatActSummary(r)).toBe('result=no-action');
+  });
+
+  it('actResult=failed + Persistence → result=refused_by_substrate;law=persistence', () => {
+    const r: ActOutput = { ...base, actResult: 'failed', actFailureKind: 'persistence', actFailedReason: 'Persistence violation…' };
+    expect(formatActSummary(r)).toBe('result=refused_by_substrate;law=persistence');
+  });
+
+  it('actResult=failed + No-progress → result=refused_by_substrate;law=no-progress', () => {
+    const r: ActOutput = { ...base, actResult: 'failed', actFailureKind: 'no-progress', actFailedReason: 'No-progress…' };
+    expect(formatActSummary(r)).toBe('result=refused_by_substrate;law=no-progress');
+  });
+
+  it('actResult=failed + Read-cap → result=refused_by_substrate;law=read-cap', () => {
+    const r: ActOutput = { ...base, actResult: 'failed', actFailureKind: 'read-cap', actFailedReason: 'Read-cap…' };
+    expect(formatActSummary(r)).toBe('result=refused_by_substrate;law=read-cap');
+  });
+
+  it('actResult=failed + denied → result=denied', () => {
+    const r: ActOutput = { ...base, actResult: 'failed', actFailureKind: 'denied', actFailedReason: 'denied: budget' };
+    expect(formatActSummary(r)).toBe('result=denied');
+  });
+
+  it('actResult=failed + exec_error → result=exec_error', () => {
+    const r: ActOutput = { ...base, actResult: 'failed', actFailureKind: 'exec_error', actFailedReason: 'boom' };
+    expect(formatActSummary(r)).toBe('result=exec_error');
+  });
+
+  it('actResult=failed + action_not_found → result=exec_error (bucketed)', () => {
+    const r: ActOutput = { ...base, actResult: 'failed', actFailureKind: 'action_not_found', actFailedReason: 'action not found: foo' };
+    expect(formatActSummary(r)).toBe('result=exec_error');
+  });
+
+  it('actResult=failed with no actFailureKind (defensive fallback) → result=exec_error', () => {
+    const r: ActOutput = { ...base, actResult: 'failed', actFailedReason: 'legacy path' };
+    expect(formatActSummary(r)).toBe('result=exec_error');
+  });
+
+  it('the c50 silent-fail case is now visible — publish-app exit 1 surfaces as exit=1, not ok', () => {
+    // Historical regression: c50 ran `publish-app agent-builder` which exited 1
+    // ("No Dockerfile in current directory") but output_summary was `result=ok`,
+    // silently masking the failure. Under FIX-006 this reads `result=ok;exit=1`
+    // — the operator (and the architect) see the nonzero exit at a glance.
+    const r: ActOutput = {
+      ...base,
+      actResult: 'ok',
+      actData: { exitCode: 1, stdout: 'ERROR: No Dockerfile in current directory', stderr: '' },
+    };
+    expect(formatActSummary(r)).toBe('result=ok;exit=1');
+  });
+});
+

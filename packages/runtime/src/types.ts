@@ -180,9 +180,27 @@ export interface DecideOutput extends GroundOutput {
   /** Input parameters for the chosen action, parsed from the R++ TOKENS block. */
   readonly chosenInput: Record<string, unknown>;
 }
+/**
+ * FIX-006 (2026-07-18): failure category for act phase outcomes. Distinguishes
+ * pre-spawn substrate refusals (persistence / no-progress / read-cap) from
+ * capability-level errors (spawn/exec failed, action lookup failed) from
+ * permission denials. Consumed by the phase-runner's output_summary formatter
+ * so the trace surface can show WHICH kind of failure occurred, instead of
+ * collapsing all failure paths into a single `result=failed` bit.
+ */
+export type ActFailureKind =
+  | 'persistence'      // substrate Persistence law refused (exact-input repeat)
+  | 'no-progress'      // substrate No-progress law refused (stall detection)
+  | 'read-cap'         // substrate Read-cap law refused (already read this run)
+  | 'action_not_found' // named action not registered or not invokable
+  | 'denied'           // capability's canInvoke() returned allow=false
+  | 'exec_error';      // capability's invoke() threw / rejected
+
 export interface ActOutput extends DecideOutput {
   readonly actResult: 'ok' | 'no-action' | 'failed';
   readonly actFailedReason?: string;
+  /** FIX-006: category discriminator when actResult='failed'. Undefined for 'ok'/'no-action'. */
+  readonly actFailureKind?: ActFailureKind;
   /** Result data from the invoked capability (capped). Persisted to episodic memory by write. */
   readonly actData?: unknown;
 }
