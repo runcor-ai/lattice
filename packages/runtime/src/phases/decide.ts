@@ -1,7 +1,7 @@
 import { ModelBackendError } from '@runcor/engine';
 import type { RppDocument, TokenValue } from '@runcor/rpp-parser';
 
-import type { CycleContext, DecideOutput, RecallOutput } from '../types.js';
+import type { CycleContext, DecideOutput, GroundOutput } from '../types.js';
 import { handleUsageLimit } from '../usage-limit-handler.js';
 
 /**
@@ -20,7 +20,7 @@ import { handleUsageLimit } from '../usage-limit-handler.js';
  */
 export async function decide(
   ctx: CycleContext,
-  prev: RecallOutput,
+  prev: GroundOutput,
 ): Promise<DecideOutput> {
   let decision;
   try {

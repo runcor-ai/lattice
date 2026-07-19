@@ -8,22 +8,24 @@ import { renderWatchdogCorrections } from '../watchdog-corrections.js';
 import type {
   CycleContext,
   GroundOutput,
-  MemoryRecallView,
-  ObserveOutput,
+  MemoryWrite,
+  RecallOutput,
   TasksView,
 } from '../types.js';
 
 /**
- * Number of the lattice's own most-recent cycle-outcome memories to
- * surface in every cycle's reality slice. Run-3 evidence showed that
- * an 8-entry window catches consecutive repetition but loses context
- * older than ~80 seconds, leading the lattice to redo work that
- * happened 10-20 cycles ago (re-read package.json on cycles 2/11/20,
- * dir src on 12/22, etc.). 24 entries × ~280 bytes = ~6.7 KB — still
- * trivial for any modern model context, and covers ~4 minutes of
- * action history at a 10s/cycle pace.
+ * Per-memory-entry byte cap for the recent-actions display.
+ *
+ * Historical sizing note: run-3 evidence showed an 8-entry window catches
+ * consecutive repetition but loses context older than ~80s, leading the
+ * lattice to redo work that happened 10-20 cycles ago (re-read
+ * package.json on cycles 2/11/20, dir src on 12/22, etc.). Prior code
+ * displayed up to 24 entries via `recentEpisodic(24)`. FIX-008 removed
+ * that separate query in favor of `prev.memories` (currently 8 entries
+ * from `recall.reinforceRecalled(8)`), so the LLM sees exactly what
+ * the substrate's Memory-law audits. To restore the wider window,
+ * bump the reinforce limit in phases/recall.ts.
  */
-const RECENT_ACTIONS_LIMIT = 24;
 const RECENT_ACTION_MAX_BYTES = 280;
 
 /**
@@ -74,7 +76,7 @@ const TOTAL_SENSE_DATA_CAP = 16384;
  */
 export async function ground(
   ctx: CycleContext,
-  prev: ObserveOutput,
+  prev: RecallOutput,
 ): Promise<GroundOutput> {
   // Surface the sensed DATA (capped), not just the 'ok'/'failed' status — without
   // this the entity is blind to its own corpus (a digest sense's content, a listing).
@@ -102,10 +104,20 @@ export async function ground(
   // Item 1 — prefer the fast-clock situation report (a synthesized "here
   // is where we are") over re-injecting raw cycle history. Falls back to
   // the raw recent-actions block before the first fast-clock tick.
+  // FIX-008: recall now runs before ground, so prev.memories carries the
+  // memory set the substrate will audit. Render those memories directly so
+  // the LLM sees the same set judge.ts audits against — closing the "two
+  // disjoint memory paths" gap. When situation_current is populated, show
+  // BOTH the narrative summary AND the raw memories: the summary gives the
+  // LLM a running-state frame; the raw memory block is what the audit
+  // checks against.
   const situation = ctx.recall.currentSituation();
+  const recentActionsBlock = renderRecentActions(prev.memories);
   const contextBlock = situation
-    ? `situation (your running summary — trust this over re-deriving state from scratch):\n${situation}`
-    : renderRecentActions(ctx.recall);
+    ? (recentActionsBlock
+        ? `situation (your running summary — trust this over re-deriving state from scratch):\n${situation}\n\n${recentActionsBlock}`
+        : `situation (your running summary — trust this over re-deriving state from scratch):\n${situation}`)
+    : recentActionsBlock;
 
   // Item 15 — when the work has stalled, lead the reality slice with a
   // high-salience posture-change demand so the decide call cannot miss it.
@@ -238,23 +250,31 @@ function renderActionMenu(actions: readonly Capability<unknown, unknown>[]): str
  * Surface the lattice's own most-recent cycle-outcome memories in the
  * reality slice so the deciding model can SEE what it just did.
  *
- * Without this, the cycle order (ground → recall → decide) means the
- * model only ever sees identity + senses + open tasks + instruction —
- * never its own action history. That blindness was the root cause of
- * the observed run-1 dir-loop and run-2 write-without-close failure
- * modes: the lattice repeatedly chose the same exploratory action
- * because nothing in its prompt reflected that the action had already
- * succeeded last cycle.
+ * FIX-008 (2026-07-18): now takes the memory array directly instead of
+ * pulling from a MemoryRecallView. The caller passes `prev.memories`
+ * from the recall phase, so the LLM sees exactly the set the substrate's
+ * Memory-law audits against (previously the two paths were disjoint —
+ * recall pulled 8, this function pulled 24 via a separate query, and
+ * judge.ts audited the 8 the LLM never saw).
  *
- * The substrate's Memory law specifically requires referencing memory
- * when memory is available; this block makes that reference possible
- * by putting the memories in front of the model.
+ * Historical note: with the old cycle order (ground → recall → decide),
+ * the model would have seen identity + senses + open tasks + instruction
+ * but never its own action history — that blindness caused the run-1
+ * dir-loop and run-2 write-without-close failure modes. The new order
+ * (recall → ground → decide) makes prev.memories available in ground,
+ * and this block puts them in front of the model.
  *
  * Generic across all lattices, all backends, all tasks. The block is
  * empty (and elided) on cycle 1 when no prior memories exist.
+ *
+ * Window size note: prev.memories currently contains up to 8 entries
+ * (from `recall.reinforceRecalled(8)` in recall.ts). Prior behavior
+ * displayed up to 24 via `recentEpisodic(RECENT_ACTIONS_LIMIT=24)`;
+ * dropping to 8 aligns display with the audited set. Increasing the
+ * recall count in recall.ts is a follow-on tweak, not part of FIX-008.
+ * RECENT_ACTION_MAX_BYTES still caps per-entry body size.
  */
-function renderRecentActions(recall: MemoryRecallView): string {
-  const memories = recall.recentEpisodic(RECENT_ACTIONS_LIMIT);
+function renderRecentActions(memories: readonly MemoryWrite[]): string {
   if (memories.length === 0) return '';
   const lines = ['recent actions (oldest first, most-recent last) — your own action history this run:'];
   for (const m of memories) {

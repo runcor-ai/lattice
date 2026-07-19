@@ -8,8 +8,8 @@
 
 export const CYCLE_PHASES = [
   'observe',
-  'ground',
   'recall',
+  'ground',
   'decide',
   'act',
   'judge',

@@ -2,11 +2,18 @@
  * Runtime types — the cycle's state machine and shared cycle context.
  *
  * Constitution Principle VI pins the eight phases in order:
- *   observe → ground → recall → decide → act → judge → write → pulse
+ *   observe → recall → ground → decide → act → judge → write → pulse
+ *
+ * Order note (FIX-008, 2026-07-18): recall runs BEFORE ground so ground
+ * can inject recall's memory set directly into the grounded prompt. Prior
+ * ordering (observe → ground → recall) meant recall's memories never
+ * reached the LLM through decide (which sends ground.groundedPrompt built
+ * pre-recall), and the substrate's Memory-law audited a set the LLM never
+ * saw. The reorder collapses the two paths into one.
  *
  * The phase order is enforced at the type level: each phase's output
  * type is the next phase's input type. You cannot call `decide` before
- * `recall` returned, etc.
+ * `ground` returned, etc.
  */
 
 import type {
@@ -151,17 +158,20 @@ export interface CycleContext {
 }
 
 // Per-phase outputs (each phase's output is the next phase's input).
+// FIX-008: RecallOutput now extends ObserveOutput and GroundOutput extends
+// RecallOutput, so recall (which runs first) can pass its memory set
+// through ground for injection into the grounded prompt.
 export interface ObserveOutput {
   readonly perception: PerceptionSnapshot;
 }
-export interface GroundOutput extends ObserveOutput {
+export interface RecallOutput extends ObserveOutput {
+  readonly memories: readonly MemoryWrite[];
+}
+export interface GroundOutput extends RecallOutput {
   /** Slice 5: substrate-wrapped, R++-typed prompt. */
   readonly groundedPrompt: RppPrompt;
 }
-export interface RecallOutput extends GroundOutput {
-  readonly memories: readonly MemoryWrite[];
-}
-export interface DecideOutput extends RecallOutput {
+export interface DecideOutput extends GroundOutput {
   /** Slice 8: parser-validated R++ tree + usage from the decider. */
   readonly decision: DecideResult;
   /** Plain-text rendering of the decision for downstream substrate checks. */
@@ -196,9 +206,9 @@ export interface PulseOutput {
  */
 export type PhaseRunners = {
   observe(ctx: CycleContext): Promise<ObserveOutput>;
-  ground(ctx: CycleContext, prev: ObserveOutput): Promise<GroundOutput>;
-  recall(ctx: CycleContext, prev: GroundOutput): Promise<RecallOutput>;
-  decide(ctx: CycleContext, prev: RecallOutput): Promise<DecideOutput>;
+  recall(ctx: CycleContext, prev: ObserveOutput): Promise<RecallOutput>;
+  ground(ctx: CycleContext, prev: RecallOutput): Promise<GroundOutput>;
+  decide(ctx: CycleContext, prev: GroundOutput): Promise<DecideOutput>;
   act(ctx: CycleContext, prev: DecideOutput): Promise<ActOutput>;
   judge(ctx: CycleContext, prev: ActOutput): Promise<JudgeOutput>;
   write(ctx: CycleContext, prev: JudgeOutput): Promise<WriteOutput>;

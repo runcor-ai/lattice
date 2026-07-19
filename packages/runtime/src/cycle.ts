@@ -82,19 +82,20 @@ export async function runCycle(
       () => phases.observe(ctx),
       (r: any) => `senses=${Object.keys(r.perception.senses).length}`,
     );
-    out.ground = await runPhase(
-      'ground',
-      () => phases.ground(ctx, out.observe as any),
-      (r: any) => `prompt_bytes=${r.groundedPrompt.length}`,
-    );
+    // FIX-008: recall runs BEFORE ground so ground can inject prev.memories.
     out.recall = await runPhase(
       'recall',
-      () => phases.recall(ctx, out.ground as any),
+      () => phases.recall(ctx, out.observe as any),
       (r: any) => `memories=${r.memories.length}`,
+    );
+    out.ground = await runPhase(
+      'ground',
+      () => phases.ground(ctx, out.recall as any),
+      (r: any) => `prompt_bytes=${r.groundedPrompt.length}`,
     );
     out.decide = await runPhase(
       'decide',
-      () => phases.decide(ctx, out.recall as any),
+      () => phases.decide(ctx, out.ground as any),
       (r: any) =>
         `action=${r.chosenAction ?? '(none)'};blocks=${r.decision.output.ast.blocks.length}`,
     );
