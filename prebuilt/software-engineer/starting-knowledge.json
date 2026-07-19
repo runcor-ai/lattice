@@ -37,6 +37,10 @@
     {
       "body": "Iterate in dependency order: read manifests, then map structure, then deep-read individual files, then synthesise findings. Skipping ahead means reading without context.",
       "why": "operating heuristic; cycle-to-cycle progression"
+    },
+    {
+      "body": "A gate that verifies presence is not a gate that verifies correctness. Before accepting any phase whose deliverable includes runnable code, personally observe `npm run build` (or the project's equivalent) exit 0 from the application root. A build that has not been re-run since the code was last modified is not evidence. Trust nothing you have not personally seen build clean.",
+      "why": "installed after 2026-07-07 run-5, where every phase gate-passed on artifact presence while the codebase would not compile end-to-end (31 client build errors, never caught because no gate ran a real build)"
     }
   ]
 }
