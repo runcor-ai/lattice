@@ -192,6 +192,7 @@ export type ActFailureKind =
   | 'persistence'      // substrate Persistence law refused (exact-input repeat)
   | 'no-progress'      // substrate No-progress law refused (stall detection)
   | 'read-cap'         // substrate Read-cap law refused (already read this run)
+  | 'standing'         // FIX-004: substrate Standing law refused (attempts to direct a peer lattice)
   | 'action_not_found' // named action not registered or not invokable
   | 'denied'           // capability's canInvoke() returned allow=false
   | 'exec_error';      // capability's invoke() threw / rejected

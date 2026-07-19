@@ -8,7 +8,7 @@ import { observe } from './phases/observe.js';
 import { pulse } from './phases/pulse.js';
 import { recall } from './phases/recall.js';
 import { write } from './phases/write.js';
-import type { ActOutput, CycleContext, CycleResult, PhaseRunners } from './types.js';
+import type { ActFailureKind, ActOutput, CycleContext, CycleResult, PhaseRunners } from './types.js';
 
 export const DEFAULT_PHASES: PhaseRunners = {
   observe,
@@ -45,6 +45,20 @@ export const DEFAULT_PHASES: PhaseRunners = {
  * FIX-006 c50 silent-fail (publish-app exit 1 read as ok) and the c27/c30/c32
  * Persistence-refusal-looks-like-check-failure conflation.
  */
+/**
+ * FIX-004 (2026-07-18): the set of ActFailureKind values that represent a
+ * substrate-law refusing dispatch pre-spawn. formatActSummary reads from this
+ * set to emit `result=refused_by_substrate;law=<name>` uniformly, so promoting
+ * a new law from observing to gating is a one-line addition here (plus the
+ * ActFailureKind union in types.ts plus the pre-act check itself in act.ts).
+ */
+const SUBSTRATE_LAW_KINDS = new Set<ActFailureKind>([
+  'persistence',
+  'no-progress',
+  'read-cap',
+  'standing', // FIX-004: promoted at 2026-07-18
+]);
+
 export function formatActSummary(actOutput: ActOutput): string {
   if (actOutput.actResult === 'ok') {
     const data = actOutput.actData as { exitCode?: unknown } | undefined;
@@ -56,7 +70,7 @@ export function formatActSummary(actOutput: ActOutput): string {
   if (actOutput.actResult === 'no-action') return 'result=no-action';
   // actResult === 'failed'
   const kind = actOutput.actFailureKind;
-  if (kind === 'persistence' || kind === 'no-progress' || kind === 'read-cap') {
+  if (kind && SUBSTRATE_LAW_KINDS.has(kind)) {
     return `result=refused_by_substrate;law=${kind}`;
   }
   if (kind === 'denied') return 'result=denied';

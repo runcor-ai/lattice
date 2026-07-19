@@ -17,6 +17,7 @@
 export { wrap, isRppPrompt, type RppPrompt, type WrapContext } from './wrap.js';
 export {
   discern,
+  gatingCheck,
   type DiscernContext,
   type LlmLawCheck,
 } from './discern.js';

@@ -206,6 +206,29 @@ const CHECKERS: Record<LawId, LawChecker> = {
   },
 };
 
+/**
+ * FIX-004 (2026-07-18): run a single named law's code-check against the output.
+ * Exposed so pre-act gating in `runtime/phases/act.ts` can invoke ONLY the
+ * promoted-to-gate laws (currently just Standing) without running the full
+ * 11-law discern() batch. The observe-only laws stay running in judge()
+ * post-act as before — this doesn't disable them, it just adds the option
+ * for callers to fire specific laws early.
+ *
+ * Per-law audit at FIX-004 time: only Standing passed the safe-to-gate bar.
+ * Reality/Constraint/Memory/Judgment/Feedback/Cost-Value/Translation/Compounding
+ * all have false-positive triggers on benign verdict prose (documented in FIXLOG
+ * FIX-004 entry — Constraint is the worst offender, matching "specification"
+ * because of a missing word-boundary on "spec"). Do NOT add those to gatingCheck
+ * without a trigger-tightening follow-on first.
+ */
+export function gatingCheck(
+  law: LawId,
+  output: string,
+  ctx: DiscernContext,
+): LawFinding {
+  return CHECKERS[law](output, ctx);
+}
+
 export async function discern(
   output: string,
   ctx: DiscernContext,

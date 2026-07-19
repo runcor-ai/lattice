@@ -1,5 +1,6 @@
 import { actOne, type ActContext } from '@runcor/capabilities';
 import { JobsService } from '@runcor/jobs';
+import { gatingCheck, type DiscernContext } from '@runcor/substrate';
 
 import {
   awaitingOperator,
@@ -178,6 +179,53 @@ export async function act(ctx: CycleContext, prev: DecideOutput): Promise<ActOut
       actFailureKind: 'read-cap',
       actFailedReason: `Read-cap: you already read "${readPath}" this run — you HOLD its content. Re-reading is capped to force a decision. Reason over what you hold and COMMIT now: REVISE (if the kill-condition is met) / HOLD / HELD-CAVEAT (if the signal pressures a call but the kill-condition is not yet met). Do NOT re-read.`,
     };
+  }
+
+  // FIX-004: pre-act gating for substrate discern-laws promoted to gate.
+  //
+  // Currently the only promoted law is Standing (highly-specific block trigger:
+  // `i (instruct|direct|order|command|tell) the (other|peer)?lattice`, essentially
+  // never fires on benign prose). The other ten discern-laws stay observe-only
+  // in judge() post-act — they false-positive on benign verdict prose (see
+  // FIXLOG FIX-004 per-law audit).
+  //
+  // When a promoted law blocks, we emit the substrate trace row matching
+  // judge.ts's format (kind='substrate', law=<LawId>, outcome='block') so the
+  // audit surface is uniform, and return actResult='failed' with the matching
+  // actFailureKind so the phase-runner's output_summary emits
+  // `result=refused_by_substrate;law=standing` (per FIX-006's format).
+  //
+  // Judge still runs post-act on all 11 laws for observation/audit; a blocked
+  // pre-act action may see its Standing violation re-recorded by judge (phase=
+  // 'judge' vs phase='act' distinguishes them in the trace).
+  if (prev.decisionText && !resting) {
+    const discernCtx: DiscernContext = {
+      // Minimal context — Standing's checker doesn't consult realityEntities,
+      // constraintSummary, or recalledMemoryIds. Future gating-promoted laws
+      // may need real values; extend the builder then.
+      realityEntities: new Set(),
+      constraintSummary: '',
+      recalledMemoryIds: new Set(),
+      dials: { autonomy: ctx.autonomy },
+    };
+    const standing = gatingCheck('Standing', prev.decisionText, discernCtx);
+    if (standing.outcome === 'block') {
+      ctx.trace.write({
+        kind: 'substrate',
+        cycle: ctx.cycle,
+        at_ms: ctx.at_ms,
+        phase: 'act',
+        outcome: 'block',
+        law: 'Standing',
+        reason: standing.reason,
+      });
+      return {
+        ...prev,
+        actResult: 'failed',
+        actFailureKind: 'standing',
+        actFailedReason: `Standing violation: ${standing.reason}. The architect has no established standing over other lattices; do not direct, instruct, or command them.`,
+      };
+    }
   }
 
   const actCtx: ActContext = {
