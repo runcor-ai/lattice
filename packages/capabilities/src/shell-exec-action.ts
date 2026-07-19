@@ -19,13 +19,86 @@ import type {
  * Operators who want broader power must pass an extended allowlist
  * explicitly at construction.
  *
- * The verb is the FIRST token of the command after trimming. If
+ * The verb is the FIRST token of the command after tokenizing. If
  * the verb is not in the allowlist, the call fails before spawn().
  *
- * Note: on Windows, spawn() with shell:true is used so that .cmd
- * shims resolve. Output is truncated at outputMaxBytes (default 8KB)
- * to keep stored memories small.
+ * Tokenization is quote-aware (single and double quotes, backslash
+ * escapes) so a quoted path with spaces stays one argv entry. The
+ * spawn call uses argv[0] as the binary and argv.slice(1) as args
+ * with shell:false on all platforms — no shell interpretation of
+ * pipes/redirects/metacharacters (the sandbox is `binary arg arg`
+ * only, deliberately narrower than a real shell). Output is truncated
+ * at outputMaxBytes (default 8KB) to keep stored memories small.
  */
+
+/**
+ * tokenizeCommand — POSIX-lite command splitter for shell-exec.
+ *
+ * Splits on whitespace; respects single quotes (literal, no escapes),
+ * double quotes (backslash escapes the next char), and unquoted
+ * backslash escapes. Does NOT expand variables, globs, or command
+ * substitutions — those are shell features we intentionally do not
+ * offer (the sandbox is `binary arg arg`, not a shell).
+ *
+ * Throws on unterminated quotes; returns [] for empty/whitespace input.
+ */
+export function tokenizeCommand(cmd: string): string[] {
+  const tokens: string[] = [];
+  let cur = '';
+  let haveCur = false; // distinguishes empty-arg (from "" or '') from no-arg-yet
+  let inSingle = false;
+  let inDouble = false;
+  let i = 0;
+  while (i < cmd.length) {
+    const c = cmd[i]!;
+    if (inSingle) {
+      if (c === "'") {
+        inSingle = false;
+      } else {
+        cur += c;
+        haveCur = true;
+      }
+    } else if (inDouble) {
+      if (c === '\\' && i + 1 < cmd.length) {
+        cur += cmd[i + 1]!;
+        haveCur = true;
+        i++;
+      } else if (c === '"') {
+        inDouble = false;
+      } else {
+        cur += c;
+        haveCur = true;
+      }
+    } else if (c === "'") {
+      inSingle = true;
+      haveCur = true;
+    } else if (c === '"') {
+      inDouble = true;
+      haveCur = true;
+    } else if (c === '\\' && i + 1 < cmd.length) {
+      cur += cmd[i + 1]!;
+      haveCur = true;
+      i++;
+    } else if (/\s/.test(c)) {
+      if (haveCur) {
+        tokens.push(cur);
+        cur = '';
+        haveCur = false;
+      }
+    } else {
+      cur += c;
+      haveCur = true;
+    }
+    i++;
+  }
+  if (inSingle || inDouble) {
+    throw new Error(
+      `shell-exec: unterminated ${inSingle ? "'" : '"'} in command: ${cmd}`,
+    );
+  }
+  if (haveCur) tokens.push(cur);
+  return tokens;
+}
 
 export interface ShellExecInput {
   readonly command: string;
@@ -105,22 +178,30 @@ export async function runShellCommand(opts: RunShellOptions): Promise<ShellExecR
   const allowed = new Set((opts.allowedVerbs ?? DEFAULT_ALLOWLIST).map((v) => v.toLowerCase()));
   const timeoutMs = opts.timeoutMs ?? 30_000;
   const outputCap = opts.outputMaxBytes ?? 8_000;
-  const useShell = process.platform === 'win32';
 
   if (typeof opts.command !== 'string' || opts.command.trim().length === 0) {
     throw new Error('shell-exec: command (non-empty string) is required');
   }
   const command = opts.command.trim();
-  const verb = (command.split(/\s+/)[0] ?? '').toLowerCase();
+  const argv = tokenizeCommand(command);
+  if (argv.length === 0) {
+    throw new Error('shell-exec: command tokenized to zero args');
+  }
+  const verb = argv[0]!.toLowerCase();
   if (!allowed.has(verb)) {
     throw new Error(`shell-exec: verb "${verb}" not in allowlist (${[...allowed].sort().join(', ')})`);
   }
 
   const start = Date.now();
   return await new Promise<ShellExecResult>((resolveP, rejectP) => {
-    const child = spawn(command, [], {
+    // FIX-001: previously spawned with shell:false on Linux passing the WHOLE
+    // command string as argv[0], which yields ENOENT for any multi-token
+    // command. Fix: tokenize the command (quote-aware) and pass argv[0] as
+    // the binary + argv.slice(1) as args. shell:false on all platforms so
+    // the sandbox stays `binary arg arg` — no pipes/redirects/metacharacters.
+    const child = spawn(argv[0]!, argv.slice(1), {
       cwd: jailedCwd,
-      shell: useShell,
+      shell: false,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let stdout = '';
