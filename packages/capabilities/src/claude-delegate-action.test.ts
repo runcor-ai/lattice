@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -131,25 +131,32 @@ describe('claude-delegate-action — FIX-005 exit-vs-close', () => {
   );
 
   it.skipIf(isWin)(
-    'group-kill reaches grandchildren on timeout (no orphaned processes)',
+    'group-kill reaches grandchildren on timeout (grandchild PID actually dies)',
     async () => {
-      // A child that spawns a detached grandchild, waits briefly, then hangs.
-      // The timeout must group-kill both — direct child.kill() would leave
-      // the grandchild orphaned (the pre-fix behavior).
+      // Reliable strong check: the shim writes its grandchild's PID to a file
+      // in workdir/ before hanging, so the test can read the PID even though
+      // the delegate's rejection doesn't return stdout. After the timeout +
+      // grace period, we assert the grandchild PID no longer exists by probing
+      // `process.kill(pid, 0)` — signal 0 doesn't send anything, just checks
+      // existence; ESRCH means the process is dead.
       //
-      // We assert the grandchild's pid dies within a few hundred ms of the
-      // timeout firing. If group-kill doesn't work, the grandchild lives on
-      // (adopted by init) and this test's process check would find it alive.
+      // Pre-fix (SIGTERM to direct child only): grandchild survives (adopted
+      // by init), process.kill(pid, 0) succeeds → assertion fails.
+      // Fixed (detached:true + process.kill(-pgid, SIGKILL) after grace):
+      // grandchild is in the shim's process group, group-kill reaches it,
+      // process.kill(pid, 0) throws ESRCH → assertion passes.
+      const pidFile = join(workdir, 'grandchild.pid');
       const shim = [
         '-e',
         [
           "const cp = require('child_process');",
-          // Grandchild sleeps 30s. IMPORTANT: does NOT detach — so on non-Windows
-          // it stays in the same process group as its parent (the shim), which is
-          // in the group we started with detached:true from the delegate. Group-kill
-          // will reach it.
+          "const fs = require('fs');",
+          // Grandchild sleeps 30s. Does NOT detach — inherits the shim's pgid.
+          // The delegate started the shim with detached:true, so the shim IS the
+          // pgid leader and process.kill(-shim.pid, SIGKILL) will reach the gc.
           "const gc = cp.spawn(process.execPath, ['-e', 'setTimeout(()=>{}, 30000)'], { stdio: 'inherit' });",
-          // Print the grandchild pid so we can check it later.
+          // Write the grandchild pid to a file before hanging — the test reads it.
+          `fs.writeFileSync(${JSON.stringify(pidFile)}, String(gc.pid));`,
           "process.stdout.write('GC_PID=' + gc.pid + '\\n');",
           // Hang the shim indefinitely.
           'setTimeout(() => {}, 60000);',
@@ -164,31 +171,44 @@ describe('claude-delegate-action — FIX-005 exit-vs-close', () => {
         outputMaxBytes: 4_000,
       });
 
-      let gcPid = -1;
+      let rejected = false;
       try {
         await action.invoke({ subtask: 'ignored' }, makeCtx());
-        throw new Error('expected timeout rejection, promise resolved');
       } catch (err) {
-        // Extract the GC_PID from anywhere in the error's message OR from the
-        // action's stdout capture (attached to the rejection when possible).
-        // On rejection we don't get the stdout back through the API, so
-        // we probe /proc directly: if the grandchild pid pattern was in the
-        // pre-reject stdout at all, it should be dead by now.
+        rejected = true;
         expect(String(err)).toMatch(/timed out after 1000ms/);
       }
+      expect(rejected).toBe(true);
 
-      // Give SIGKILL a moment to propagate through the group.
-      await new Promise((r) => setTimeout(r, 500));
+      // Wait for SIGKILL grace period (2s in fix) + a small margin so the group
+      // kill has had time to propagate through the tree.
+      await new Promise((r) => setTimeout(r, 2_500));
 
-      // We don't have gcPid directly; instead, count Node processes that were
-      // started by our test and are still alive. In practice, if group-kill
-      // works, there should be no orphaned setTimeout-30000 processes.
-      // (This is a soft check — the strong check is the timeout-rejects-cleanly
-      // test above, which proves the group-kill path runs. This test verifies
-      // no orphans linger.)
-      // Nothing to assert on gcPid directly without stdout capture from the
-      // rejection — the primary FIX-005 signal is the first test's timing.
-      expect(true).toBe(true);
+      // Strong assertion: the grandchild PID must be readable AND dead.
+      expect(existsSync(pidFile)).toBe(true);
+      const gcPid = parseInt(readFileSync(pidFile, 'utf8').trim(), 10);
+      expect(Number.isFinite(gcPid)).toBe(true);
+      expect(gcPid).toBeGreaterThan(0);
+
+      // process.kill(pid, 0) — signal 0 doesn't send anything, just probes
+      // existence. If the process still exists, this succeeds silently. If
+      // ESRCH (no such process), it throws. Fixed code: throws. Pre-fix:
+      // succeeds (grandchild orphaned, still alive).
+      let stillAlive = true;
+      try {
+        process.kill(gcPid, 0);
+      } catch (err) {
+        // ESRCH is what we want — grandchild is gone.
+        expect((err as NodeJS.ErrnoException).code).toBe('ESRCH');
+        stillAlive = false;
+      }
+
+      if (stillAlive) {
+        // If we got here on the fixed code, something's wrong. Clean up the
+        // stray process before failing the assertion so the test doesn't leak.
+        try { process.kill(gcPid, 'SIGKILL'); } catch { /* ignore */ }
+      }
+      expect(stillAlive).toBe(false);
     },
     15_000,
   );
